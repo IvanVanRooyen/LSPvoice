@@ -129,7 +129,7 @@ class ScenarioRunTests(unittest.TestCase):
             self.assertLessEqual(set(s.get('judge_sources', [])), registry, s['id'])
             for spec in s.get('expect', {}).get('tools_called', []) + s.get('expect', {}).get('tools_not_called', []):
                 name = spec if isinstance(spec, str) else spec['name']
-                self.assertIn(name, {'lookup_device', 'get_guide', 'create_ticket', 'finish_call', 'search_knowledge'})
+                self.assertIn(name, {'lookup_device', 'get_guide', 'create_ticket', 'finish_call', 'search_knowledge', 'report_problem'})
 
 
 class TranscriptTests(unittest.TestCase):

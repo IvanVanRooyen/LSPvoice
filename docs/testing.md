@@ -67,6 +67,13 @@ RNS bed 5EC0101 exist in the inventory. Run `test_harness` afterwards: it valida
   Confirmed with 9 scenarios × 2 runs: 15/18 passed (the 3 failures were judge disagreements,
   since corrected), US$0.29, median time to first word 1.3 s, slowest 10% 2.3 s, no formatting
   reached speech.
+- 27 Nov: 35 new scenarios (55 in total), adapted from the earlier test catalogue and staff
+  scenarios: identification variants, terminal identification and naming, every guide, prices,
+  buying, safety, unavailable features, topic changes, repeats, problem reports and off-topic
+  questions. First run 32/35. Fixes from it: name the identified terminal once, acknowledge every
+  problem when a caller raises two, one question per reply, and an honest AI greeting. Three
+  test definitions were corrected. All affected scenarios then passed, including repeats
+  (about US$1.00 for the whole round, in capped runs).
 
 ## Staff testing loop
 

@@ -252,7 +252,7 @@ async def judge(client, meter, model, scenario, run):
 
 async def run_scenario(scenario, cfg, meter, client, sid):
     run = {'transcript': [('agent', app.WELCOME)], 'tools': [], 'finish': None, 'turns': [], 'error': None}
-    session = {}
+    session = {'reference': '4242', 'caller': '000'}  # like a real call, so problem reports get a reference
 
     async def on_text(_delta):
         pass
