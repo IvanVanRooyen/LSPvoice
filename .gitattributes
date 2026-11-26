@@ -1,0 +1,12 @@
+# Check out text files with LF line endings on every machine.
+# Knowledge sources are fingerprinted (sha256 in knowledge/registry.json): a Windows
+# checkout that converted them to CRLF would change the bytes, and the pilot would then
+# refuse calls. Python, PowerShell and the docs all work fine with LF.
+* text=auto eol=lf
+
+# Binary files: never touch.
+*.pdf  binary
+*.png  binary
+*.jpg  binary
+*.docx binary
+*.zip  binary

@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Generated: harness reports, local build output
+build/
+
+# Never commit private data. Credentials, inventory and transcripts live outside the repo
+# (../private-config); these patterns are a second line of defence.
+private-config/
+*.jsonl
+.env

@@ -1,0 +1,30 @@
+{
+  "SRC-005a": {
+    "path": "Held outside the repository: Management guidance.txt",
+    "sha256": "4a40e150252b501648a2827c922750e75118b6fd1a754efd07f6f8648f5fa984",
+    "received": "2026-11-23"
+  },
+  "SRC-005b": {
+    "path": "Held outside the repository: How-to-Buy-Entertainment 3.pdf",
+    "sha256": "34a11f3eebaf6c3b0fb08513945d4a3a69807f47ba4136ad61614e59d37a20fe",
+    "received": "2026-11-23"
+  },
+  "SRC-005c": {
+    "path": "Held outside the repository: LSPcare Support AI Agent - Payment Assistance Call Flow.pdf",
+    "sha256": "10a69cb16f4892ee4b45fb19e316c8cf77510df6f545ad8ca95a5fc17fc9d946",
+    "received": "2026-11-23"
+  },
+  "SRC-007": {
+    "path": "docs/business-rules.md",
+    "sha256": "624e21f691015544ac717af1f154bb7b85853f560acb706477723fb88a8616bb",
+    "received": "2026-11-23"
+  },
+  "SRC-ITERATION-1-MANIFEST": {
+    "path": "knowledge/intake/iteration-1-2026-11-25/manifest.json",
+    "sha256": "9f0758fc78ac632019c1122ee9404149a77b43afc6178d6c5fa844fdcd3d74b7",
+    "received": "2026-11-25",
+    "kind": "reviewed_export_manifest",
+    "originals_available": false,
+    "note": "Curated outputs supplied by Product owner; manifest records their approvals and upstream source IDs. Newly referenced upstream originals/photos and clarification records were not supplied in this ZIP. This record verifies the received manifest, not those originals."
+  }
+}

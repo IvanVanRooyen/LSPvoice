@@ -1,0 +1,519 @@
+<!DOCTYPE html>
+<html lang="en-AU">
+<head>
+<meta charset="utf-8">
+<title>LSPcare Twilio voice agent: technical reference</title>
+<style>
+  @page { size: A4 landscape; margin: 0; }
+  :root { --ink:#14213d; --muted:#5b6475; --line:#d9dee7; --soft:#f3f5f9; --navy:#1f3a68; --teal:#0f8b8d; --teal-soft:#e3f3f3;
+          --amber:#c77d0a; --amber-soft:#fbf0dc; --green:#2e7d4f; --green-soft:#e4f2e9; --red:#b23a3a; --red-soft:#fdecec; --violet:#5b4b9a; --violet-soft:#ece9f6; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; padding:0; }
+  body { font-family: "Segoe UI", Arial, sans-serif; color: var(--ink); -webkit-print-color-adjust: exact; print-color-adjust: exact; font-size: 9.5pt; }
+  .page { width:297mm; height:210mm; padding:11mm 14mm 10mm; position:relative; overflow:hidden; page-break-after:always; break-after:page; }
+  .page:last-child { page-break-after:auto; break-after:auto; }
+  .kicker { font-size:9pt; letter-spacing:.12em; text-transform:uppercase; color:var(--teal); font-weight:600; margin:0 0 1mm; }
+  h1 { font-size:22pt; margin:0 0 1mm; } h2 { font-size:17pt; margin:0 0 1mm; }
+  .lede { font-size:10.5pt; color:var(--muted); margin:0 0 4mm; max-width:250mm; }
+  .foot { position:absolute; left:14mm; right:14mm; bottom:5mm; font-size:7.5pt; color:var(--muted); display:flex; justify-content:space-between; border-top:1px solid var(--line); padding-top:1.5mm; }
+  .grid { display:grid; gap:4mm; }
+  .card { border:1px solid var(--line); border-radius:2.5mm; padding:3mm 3.5mm; background:#fff; }
+  .card h3 { margin:0 0 1.2mm; font-size:10.5pt; }
+  .card p, .card li { margin:0; font-size:8.8pt; color:var(--muted); line-height:1.33; }
+  .card ul { margin:0; padding-left:4mm; } .card li { margin:.3mm 0; }
+  code, .mono { font-family: "Cascadia Mono", Consolas, monospace; font-size:8.3pt; color:#1f3a68; }
+  table.t { width:100%; border-collapse:separate; border-spacing:0; font-size:8.6pt; }
+  table.t th { text-align:left; background:var(--navy); color:#fff; padding:1.6mm 2.4mm; font-size:8.8pt; }
+  table.t th code { color:#fff; }
+  table.t th:first-child { border-top-left-radius:1.5mm; } table.t th:last-child { border-top-right-radius:1.5mm; }
+  table.t td { padding:1.5mm 2.4mm; border-bottom:1px solid var(--line); vertical-align:top; line-height:1.3; }
+  table.t tr:nth-child(even) td { background:#fafbfd; }
+  .tag { display:inline-block; font-size:7.3pt; font-weight:700; padding:.3mm 1.6mm; border-radius:6mm; white-space:nowrap; }
+  .code { background:var(--teal-soft); color:var(--teal); } .prompt { background:var(--amber-soft); color:var(--amber); }
+  .note { font-size:7.8pt; color:var(--muted); }
+</style>
+</head>
+<body>
+
+<!-- ===================== PAGE 1: ARCHITECTURE ===================== -->
+<section class="page">
+  <p class="kicker">Technical reference · current pilot build</p>
+  <h1>System architecture</h1>
+  <p class="lede">A single Python service on the Windows PC handles every call. Twilio reaches it through a Cloudflare tunnel. The service calls out to the AI model, Zoho Desk and local data files.</p>
+
+  <svg viewBox="0 0 1080 430" width="100%" style="display:block; height:112mm;" font-family="Segoe UI, Arial, sans-serif">
+    <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" fill="#5b6475"/></marker></defs>
+    <!-- caller -->
+    <rect x="6" y="150" width="110" height="80" rx="10" fill="#f3f5f9" stroke="#d9dee7"/>
+    <text x="61" y="186" text-anchor="middle" font-size="14" font-weight="700" fill="#14213d">Caller</text>
+    <text x="61" y="206" text-anchor="middle" font-size="10.5" fill="#5b6475">PSTN / mobile</text>
+    <!-- twilio cloud -->
+    <rect x="150" y="40" width="250" height="300" rx="14" fill="#fdecec" stroke="#e5b5b5"/>
+    <text x="275" y="64" text-anchor="middle" font-size="14" font-weight="700" fill="#14213d">Twilio cloud</text>
+    <rect x="166" y="78" width="218" height="58" rx="8" fill="#fff" stroke="#e5b5b5"/>
+    <text x="275" y="100" text-anchor="middle" font-size="12" font-weight="600" fill="#14213d">Voice · number …3624</text>
+    <text x="275" y="118" text-anchor="middle" font-size="10" fill="#5b6475">webhook: POST {base}/voice</text>
+    <rect x="166" y="146" width="218" height="112" rx="8" fill="#fff" stroke="#e5b5b5"/>
+    <text x="275" y="168" text-anchor="middle" font-size="12" font-weight="600" fill="#14213d">ConversationRelay</text>
+    <text x="275" y="188" text-anchor="middle" font-size="10" fill="#5b6475">STT: Deepgram (en-AU) + hints</text>
+    <text x="275" y="205" text-anchor="middle" font-size="10" fill="#5b6475">TTS: ElevenLabs 56bWURjYF…</text>
+    <text x="275" y="222" text-anchor="middle" font-size="10" fill="#5b6475">turn detection · interruptions</text>
+    <text x="275" y="242" text-anchor="middle" font-size="10" fill="#5b6475">WSS {base}/relay (text both ways)</text>
+    <rect x="166" y="268" width="218" height="56" rx="8" fill="#fff" stroke="#e5b5b5"/>
+    <text x="275" y="290" text-anchor="middle" font-size="12" font-weight="600" fill="#14213d">&lt;Connect action&gt;</text>
+    <text x="275" y="308" text-anchor="middle" font-size="10" fill="#5b6475">POST {base}/end when relay ends</text>
+    <!-- tunnel -->
+    <rect x="440" y="150" width="120" height="80" rx="10" fill="#fff7e6" stroke="#e7c98f"/>
+    <text x="500" y="180" text-anchor="middle" font-size="12" font-weight="700" fill="#14213d">Cloudflare</text>
+    <text x="500" y="197" text-anchor="middle" font-size="10" fill="#5b6475">quick tunnel</text>
+    <text x="500" y="214" text-anchor="middle" font-size="9.5" fill="#b23a3a">URL changes per run</text>
+    <!-- PC -->
+    <rect x="600" y="20" width="270" height="390" rx="14" fill="#e3f3f3" stroke="#9ccfd0" stroke-width="2"/>
+    <text x="735" y="44" text-anchor="middle" font-size="14" font-weight="700" fill="#14213d">Windows PC · uvicorn 127.0.0.1:8101</text>
+    <rect x="616" y="58" width="238" height="128" rx="8" fill="#fff" stroke="#9ccfd0"/>
+    <text x="735" y="78" text-anchor="middle" font-size="11.5" font-weight="700" fill="#0f8b8d">app.py · FastAPI</text>
+    <text x="628" y="97" font-size="10" fill="#14213d" font-family="Consolas, monospace">POST /voice    → TwiML</text>
+    <text x="628" y="114" font-size="10" fill="#14213d" font-family="Consolas, monospace">WSS  /relay    → turn loop</text>
+    <text x="628" y="131" font-size="10" fill="#14213d" font-family="Consolas, monospace">POST /end      → final words</text>
+    <text x="628" y="148" font-size="10" fill="#14213d" font-family="Consolas, monospace">GET  /health   → status</text>
+    <text x="628" y="170" font-size="9.5" fill="#5b6475">sessions{} in memory · max 2 calls</text>
+    <rect x="616" y="196" width="115" height="44" rx="7" fill="#fff" stroke="#9ccfd0"/><text x="673" y="214" text-anchor="middle" font-size="10" font-weight="600" fill="#14213d">conversation.py</text><text x="673" y="229" text-anchor="middle" font-size="9" fill="#5b6475">turn engine (shared)</text>
+    <rect x="739" y="196" width="115" height="44" rx="7" fill="#fff" stroke="#9ccfd0"/><text x="796" y="214" text-anchor="middle" font-size="10" font-weight="600" fill="#14213d">claude_reply.py</text><text x="796" y="229" text-anchor="middle" font-size="9" fill="#5b6475">Claude API loop</text>
+    <rect x="616" y="246" width="115" height="44" rx="7" fill="#fff" stroke="#9ccfd0"/><text x="673" y="264" text-anchor="middle" font-size="10" font-weight="600" fill="#14213d">knowledge.py</text><text x="673" y="279" text-anchor="middle" font-size="9" fill="#5b6475">core · guides · search</text>
+    <rect x="739" y="246" width="115" height="44" rx="7" fill="#fff" stroke="#9ccfd0"/><text x="796" y="264" text-anchor="middle" font-size="10" font-weight="600" fill="#14213d">tools.py</text><text x="796" y="279" text-anchor="middle" font-size="9" fill="#5b6475">specs + validation</text>
+    <rect x="616" y="296" width="115" height="44" rx="7" fill="#fff" stroke="#9ccfd0"/><text x="673" y="314" text-anchor="middle" font-size="10" font-weight="600" fill="#14213d">transcripts.py</text><text x="673" y="329" text-anchor="middle" font-size="9" fill="#5b6475">live call transcripts</text>
+    <rect x="739" y="296" width="115" height="44" rx="7" fill="#fff" stroke="#9ccfd0"/><text x="796" y="314" text-anchor="middle" font-size="10" font-weight="600" fill="#14213d">tickets · zoho_desk</text><text x="796" y="329" text-anchor="middle" font-size="9" fill="#5b6475">guards + Zoho API</text>
+    <rect x="616" y="348" width="238" height="52" rx="7" fill="#fbf0dc" stroke="#e7c98f"/>
+    <text x="735" y="367" text-anchor="middle" font-size="10" font-weight="600" fill="#14213d">knowledge/ · static_inventory (lookup)</text>
+    <text x="735" y="384" text-anchor="middle" font-size="9.2" fill="#5b6475">private-config/: twilio-pilot.json · zoho-desk.json</text>
+    <text x="735" y="396" text-anchor="middle" font-size="9.2" fill="#5b6475">inventory · transcripts/ · dry-run log (owner-only)</text>
+    <!-- outbound -->
+    <rect x="920" y="50" width="150" height="100" rx="12" fill="#ece9f6" stroke="#c4bce4"/>
+    <text x="995" y="78" text-anchor="middle" font-size="12.5" font-weight="700" fill="#14213d">Anthropic API</text>
+    <text x="995" y="97" text-anchor="middle" font-size="10" fill="#5b6475">claude-sonnet-5-5</text>
+    <text x="995" y="113" text-anchor="middle" font-size="10" fill="#5b6475">effort low · streamed</text>
+    <text x="995" y="133" text-anchor="middle" font-size="9" fill="#5b6475">(OpenAI: alternative provider)</text>
+    <rect x="920" y="180" width="150" height="100" rx="12" fill="#ece9f6" stroke="#c4bce4"/>
+    <text x="995" y="208" text-anchor="middle" font-size="12.5" font-weight="700" fill="#14213d">Zoho Desk</text>
+    <text x="995" y="227" text-anchor="middle" font-size="10" fill="#5b6475">accounts.zoho.com (token)</text>
+    <text x="995" y="243" text-anchor="middle" font-size="10" fill="#5b6475">desk.zoho.com/api/v1/tickets</text>
+    <text x="995" y="262" text-anchor="middle" font-size="9" fill="#5b6475">org 675072785 · Customer Support</text>
+    <rect x="920" y="310" width="150" height="90" rx="12" fill="#fdecec" stroke="#e5b5b5"/>
+    <text x="995" y="338" text-anchor="middle" font-size="12.5" font-weight="700" fill="#14213d">Twilio REST API</text>
+    <text x="995" y="357" text-anchor="middle" font-size="10" fill="#5b6475">configure.py only:</text>
+    <text x="995" y="373" text-anchor="middle" font-size="10" fill="#5b6475">set number webhook</text>
+    <!-- arrows -->
+    <line x1="118" y1="190" x2="164" y2="190" stroke="#5b6475" stroke-width="2" marker-end="url(#a)" marker-start="url(#a)"/>
+    <text x="141" y="180" text-anchor="middle" font-size="9" fill="#5b6475">audio</text>
+    <line x1="386" y1="190" x2="438" y2="190" stroke="#5b6475" stroke-width="2" marker-end="url(#a)" marker-start="url(#a)"/>
+    <text x="412" y="180" text-anchor="middle" font-size="9" fill="#5b6475">HTTPS/WSS</text>
+    <line x1="562" y1="190" x2="614" y2="140" stroke="#5b6475" stroke-width="2" marker-end="url(#a)" marker-start="url(#a)"/>
+    <text x="580" y="152" text-anchor="middle" font-size="9" fill="#5b6475">HTTP</text>
+    <line x1="856" y1="100" x2="918" y2="100" stroke="#5b6475" stroke-width="2" marker-end="url(#a)"/>
+    <line x1="856" y1="318" x2="918" y2="232" stroke="#5b6475" stroke-width="2" marker-end="url(#a)"/>
+    <line x1="870" y1="380" x2="918" y2="360" stroke="#5b6475" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#a)"/>
+  </svg>
+
+  <div class="grid" style="grid-template-columns: repeat(4, 1fr); gap:3mm; margin-top:2mm;">
+    <div class="card"><h3>Inbound trust</h3><p>Every <code>/voice</code>, <code>/end</code> and <code>/relay</code> request must carry a valid Twilio signature for the <b>configured</b> public URL and your Account SID. The relay also needs a one-time nonce issued in <code>/voice</code>.</p></div>
+    <div class="card"><h3>State</h3><p>Call state lives in memory: the session (nonce, end reason, ticket status) and the <code>Conversation</code> (history). Between calls, nothing is remembered. Only transcripts (when on) and the dry-run log are saved. A restart clears active calls.</p></div>
+    <div class="card"><h3>Config</h3><p>Read from <code>private-config/twilio-pilot.json</code> on every request, so model, effort, voice and ticket mode apply on the next call without a restart. Code changes need a restart.</p></div>
+    <div class="card"><h3>Launcher</h3><p><code>run.ps1</code> starts the tunnel, saves its URL, starts uvicorn and moves the number's webhook. It retries three times, then shows a READY or NOT READY banner.</p></div>
+  </div>
+  <div class="foot"><span>LSPcare · Twilio voice agent · technical reference</span><span>26 Nov 2026 · 1</span></div>
+</section>
+
+<!-- ===================== PAGE 2: CALL LIFECYCLE ===================== -->
+<section class="page">
+  <p class="kicker">Call lifecycle</p>
+  <h2>From ring to hang-up</h2>
+  <p class="lede">Three HTTP touchpoints frame each call. The conversation itself runs over one WebSocket, where Twilio sends finished caller sentences and the app streams reply text back.</p>
+
+  <svg viewBox="0 0 1080 420" width="100%" style="display:block; height:108mm;" font-family="Segoe UI, Arial, sans-serif">
+    <defs><marker id="b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0L10,5L0,10z" fill="#5b6475"/></marker></defs>
+    <!-- lifelines -->
+    <g font-size="12.5" font-weight="700" fill="#14213d" text-anchor="middle">
+      <rect x="40" y="6" width="150" height="30" rx="7" fill="#f3f5f9" stroke="#d9dee7"/><text x="115" y="26">Caller</text>
+      <rect x="300" y="6" width="190" height="30" rx="7" fill="#fdecec" stroke="#e5b5b5"/><text x="395" y="26">Twilio + Relay</text>
+      <rect x="620" y="6" width="190" height="30" rx="7" fill="#e3f3f3" stroke="#9ccfd0"/><text x="715" y="26">app.py</text>
+      <rect x="900" y="6" width="150" height="30" rx="7" fill="#ece9f6" stroke="#c4bce4"/><text x="975" y="26">Claude</text>
+    </g>
+    <g stroke="#c5ccd8" stroke-width="1.5" stroke-dasharray="4 4"><line x1="115" y1="36" x2="115" y2="415"/><line x1="395" y1="36" x2="395" y2="415"/><line x1="715" y1="36" x2="715" y2="415"/><line x1="975" y1="36" x2="975" y2="415"/></g>
+    <g font-size="10.5" fill="#14213d">
+      <!-- 1 -->
+      <line x1="115" y1="58" x2="393" y2="58" stroke="#5b6475" stroke-width="1.8" marker-end="url(#b)"/><text x="254" y="52" text-anchor="middle">dials …3624</text>
+      <line x1="395" y1="80" x2="713" y2="80" stroke="#5b6475" stroke-width="1.8" marker-end="url(#b)"/><text x="554" y="74" text-anchor="middle">① POST /voice (CallSid, signed)</text>
+      <rect x="725" y="70" width="345" height="40" rx="6" fill="#e3f3f3"/>
+      <text x="733" y="86" font-size="9.5">verify signature · re-check knowledge hashes · ≤2 calls</text>
+      <text x="733" y="102" font-size="9.5">create session (nonce, 17-min expiry) → TwiML</text>
+      <line x1="713" y1="122" x2="397" y2="122" stroke="#5b6475" stroke-width="1.8" marker-end="url(#b)"/><text x="554" y="116" text-anchor="middle">&lt;Connect&gt;&lt;ConversationRelay voice, en-AU, hints, nonce&gt;</text>
+      <line x1="395" y1="144" x2="117" y2="144" stroke="#5b6475" stroke-width="1.8" marker-end="url(#b)"/><text x="254" y="138" text-anchor="middle">speaks welcome greeting</text>
+      <!-- 2 -->
+      <line x1="395" y1="168" x2="713" y2="168" stroke="#5b6475" stroke-width="1.8" marker-end="url(#b)"/><text x="554" y="162" text-anchor="middle">② WSS /relay (signed) → setup {callSid, nonce}</text>
+      <!-- loop box -->
+      <rect x="30" y="182" width="1040" height="150" rx="8" fill="none" stroke="#0f8b8d" stroke-width="1.6" stroke-dasharray="6 4"/>
+      <text x="40" y="198" font-size="10" font-weight="700" fill="#0f8b8d">LOOP · each caller turn (max 400 events, 15-min call)</text>
+      <line x1="115" y1="214" x2="393" y2="214" stroke="#5b6475" stroke-width="1.8" marker-end="url(#b)"/><text x="254" y="208" text-anchor="middle">speaks</text>
+      <line x1="395" y1="236" x2="713" y2="236" stroke="#5b6475" stroke-width="1.8" marker-end="url(#b)"/><text x="554" y="230" text-anchor="middle">{type: prompt, voicePrompt, last: true}</text>
+      <line x1="715" y1="256" x2="973" y2="256" stroke="#5b6475" stroke-width="1.8" marker-end="url(#b)"/><text x="844" y="250" text-anchor="middle">request (rules + knowledge + history + tools)</text>
+      <line x1="975" y1="276" x2="717" y2="276" stroke="#5b6475" stroke-width="1.8" marker-end="url(#b)"/><text x="844" y="270" text-anchor="middle">streamed text and/or tool calls (≤4 rounds)</text>
+      <line x1="713" y1="298" x2="397" y2="298" stroke="#5b6475" stroke-width="1.8" marker-end="url(#b)"/><text x="554" y="292" text-anchor="middle">{type: text, token, last: false} … last: true</text>
+      <line x1="395" y1="320" x2="117" y2="320" stroke="#5b6475" stroke-width="1.8" marker-end="url(#b)"/><text x="254" y="314" text-anchor="middle">hears reply as it streams</text>
+      <!-- 3 end -->
+      <line x1="713" y1="352" x2="397" y2="352" stroke="#5b6475" stroke-width="1.8" marker-end="url(#b)"/><text x="554" y="346" text-anchor="middle">{type: end} (finish_call, error or limit)</text>
+      <line x1="395" y1="374" x2="713" y2="374" stroke="#5b6475" stroke-width="1.8" marker-end="url(#b)"/><text x="554" y="368" text-anchor="middle">③ POST /end (Connect action, signed)</text>
+      <rect x="725" y="362" width="345" height="40" rx="6" fill="#e3f3f3"/>
+      <text x="733" y="378" font-size="9.5">reason clinical → nurse-call message · error → problem msg</text>
+      <text x="733" y="394" font-size="9.5">goodbye → thanks · then &lt;Hangup&gt;; session removed</text>
+      <line x1="395" y1="404" x2="117" y2="404" stroke="#5b6475" stroke-width="1.8" marker-end="url(#b)"/><text x="254" y="398" text-anchor="middle">final fixed words · hang-up</text>
+    </g>
+  </svg>
+
+  <div class="grid" style="grid-template-columns: repeat(3, 1fr); gap:3mm; margin-top:2mm;">
+    <div class="card"><h3>Interruptions (barge-in)</h3><p>Twilio sends <code>{type: interrupt, utteranceUntilInterrupt}</code>. The app cancels the running reply task, and the assistant turn in history is replaced with <b>only the words the caller actually heard</b>. The model never believes it said something the caller missed.</p></div>
+    <div class="card"><h3>New caller sentence mid-reply</h3><p>A new final prompt cancels any reply still in progress before starting the next one. Only one reply task runs per call at a time.</p></div>
+    <div class="card"><h3>Failure handling</h3><p>Any model, tool-limit or Twilio error sets reason <code>error</code> and ends the relay. The caller hears a fixed "encountered a problem" message, and the cause is logged in the pilot window (keys redacted). There are no automatic retries mid-call.</p></div>
+  </div>
+  <div class="foot"><span>LSPcare · Twilio voice agent · technical reference</span><span>2</span></div>
+</section>
+
+<!-- ===================== PAGE 3: CONVERSATION MODEL / ROUTING ===================== -->
+<section class="page">
+  <p class="kicker">The AI conversation component</p>
+  <h2>No pathway graph: one agent, rules, tools and code checks</h2>
+  <p class="lede">Bland routes a call through a drawn graph of nodes and edges. Here there is <b>one conversation loop</b>. On every turn the model sees the same rules, the core knowledge and the whole call so far, and chooses the next step: speak, use a tool, or end the call. "Routing" is the model choosing a tool. The critical routes are backed by checks in code.</p>
+
+  <div class="grid" style="grid-template-columns: 1.02fr 1fr; gap:5mm;">
+    <svg viewBox="0 0 560 400" width="100%" style="display:block; height:112mm;" font-family="Segoe UI, Arial, sans-serif">
+      <defs><marker id="c" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0L10,5L0,10z" fill="#5b6475"/></marker></defs>
+      <rect x="170" y="4" width="220" height="44" rx="10" fill="#f3f5f9" stroke="#d9dee7"/>
+      <text x="280" y="24" text-anchor="middle" font-size="12" font-weight="700" fill="#14213d">Caller turn arrives</text>
+      <text x="280" y="40" text-anchor="middle" font-size="9.5" fill="#5b6475">appended to call history</text>
+      <line x1="280" y1="48" x2="280" y2="68" stroke="#5b6475" stroke-width="1.8" marker-end="url(#c)"/>
+      <rect x="120" y="70" width="320" height="74" rx="10" fill="#ece9f6" stroke="#c4bce4"/>
+      <text x="280" y="92" text-anchor="middle" font-size="12" font-weight="700" fill="#14213d">Model decides next action</text>
+      <text x="280" y="110" text-anchor="middle" font-size="9.5" fill="#5b6475">input = SYSTEM rules + core knowledge + guide menu</text>
+      <text x="280" y="125" text-anchor="middle" font-size="9.5" fill="#5b6475">+ full text history + tool list</text>
+      <text x="280" y="139" text-anchor="middle" font-size="9.5" fill="#5b6475">Claude Sonnet 5.5 · effort low</text>
+      <g stroke="#5b6475" stroke-width="1.8" fill="none">
+        <path d="M150,144 L60,190" marker-end="url(#c)"/><path d="M230,144 L190,190" marker-end="url(#c)"/>
+        <path d="M330,144 L370,190" marker-end="url(#c)"/><path d="M410,144 L500,190" marker-end="url(#c)"/>
+      </g>
+      <g font-size="10.5" text-anchor="middle">
+        <rect x="6" y="192" width="112" height="56" rx="8" fill="#e4f2e9" stroke="#a9d3b7"/><text x="62" y="214" font-weight="700" fill="#14213d">Speak</text><text x="62" y="230" font-size="9" fill="#5b6475">answer / ask one</text><text x="62" y="242" font-size="9" fill="#5b6475">question</text>
+        <rect x="130" y="192" width="125" height="56" rx="8" fill="#fbf0dc" stroke="#e7c98f"/><text x="192" y="214" font-weight="700" fill="#14213d">Read tool</text><text x="192" y="230" font-size="9" fill="#5b6475">lookup_device · get_guide</text><text x="192" y="242" font-size="9" fill="#5b6475">search_knowledge*</text>
+        <rect x="305" y="192" width="125" height="56" rx="8" fill="#e3f3f3" stroke="#9ccfd0"/><text x="367" y="214" font-weight="700" fill="#14213d">Write tool</text><text x="367" y="230" font-size="9" fill="#5b6475">create_ticket</text><text x="367" y="242" font-size="9" fill="#5b6475">(guarded in code)</text>
+        <rect x="442" y="192" width="112" height="56" rx="8" fill="#fdecec" stroke="#e5b5b5"/><text x="498" y="214" font-weight="700" fill="#14213d">End call</text><text x="498" y="230" font-size="9" fill="#5b6475">finish_call</text><text x="498" y="242" font-size="9" fill="#5b6475">clinical | goodbye</text>
+      </g>
+      <g stroke="#0f8b8d" stroke-width="1.6" fill="none" stroke-dasharray="5 3">
+        <path d="M192,250 C192,300 120,300 120,140" marker-end="url(#c)"/>
+        <path d="M367,250 C367,300 440,300 440,140" marker-end="url(#c)"/>
+      </g>
+      <text x="125" y="300" font-size="9" fill="#0f8b8d">result → model again</text>
+      <text x="370" y="300" font-size="9" fill="#0f8b8d">result → model again</text>
+      <text x="280" y="322" text-anchor="middle" font-size="9.5" fill="#0f8b8d" font-weight="600">up to 4 model rounds per caller turn</text>
+      <line x1="62" y1="250" x2="62" y2="352" stroke="#5b6475" stroke-width="1.8" marker-end="url(#c)"/>
+      <rect x="6" y="354" width="250" height="40" rx="8" fill="#f3f5f9" stroke="#d9dee7"/>
+      <text x="131" y="372" text-anchor="middle" font-size="10" font-weight="600" fill="#14213d">streamed to Twilio → spoken</text>
+      <text x="131" y="387" text-anchor="middle" font-size="9" fill="#5b6475">then wait for the next caller turn</text>
+      <line x1="498" y1="250" x2="498" y2="352" stroke="#5b6475" stroke-width="1.8" marker-end="url(#c)"/>
+      <rect x="320" y="354" width="234" height="40" rx="8" fill="#fdecec" stroke="#e5b5b5"/>
+      <text x="437" y="372" text-anchor="middle" font-size="10" font-weight="600" fill="#14213d">/end plays fixed final words</text>
+      <text x="437" y="387" text-anchor="middle" font-size="9" fill="#5b6475">model text is never the last thing heard</text>
+    </svg>
+
+    <div>
+      <table class="t">
+        <tr><th>Caller situation</th><th>How it is routed</th><th>Enforced by</th></tr>
+        <tr><td>Hospital / bed / Device ID given</td><td><code>lookup_device</code> before claiming it was found; bed OR ID is enough; both must agree</td><td><span class="tag prompt">prompt</span> <span class="tag code">code</span> lookup</td></tr>
+        <tr><td>Screen fault, model known</td><td>Identify from description → <code>get_guide(ID)</code> → only that guide's steps; max one wake step</td><td><span class="tag prompt">prompt</span> <span class="tag code">code</span> ID list</td></tr>
+        <tr><td>Screen fault, model unclear</td><td>Unknown-hardware fallback (core); no physical guesses</td><td><span class="tag prompt">prompt</span></td></tr>
+        <tr><td>Prices / how to buy</td><td>Answer from core sources; caller's screen price wins; states concession condition</td><td><span class="tag prompt">prompt</span></td></tr>
+        <tr><td>Arm loose/dropping</td><td>"Don't adjust it" → arrange support → ticket</td><td><span class="tag prompt">prompt</span></td></tr>
+        <tr><td>Needs follow-up</td><td>Collect details → read back → yes → <code>create_ticket</code> → reads number</td><td><span class="tag prompt">prompt</span> <span class="tag code">code</span> guards</td></tr>
+        <tr><td>Pain, fall, injury, nurse</td><td>Immediately <code>finish_call(clinical)</code> → fixed nurse-call message</td><td><span class="tag prompt">prompt</span> <span class="tag code">code</span> fixed text</td></tr>
+        <tr><td>SMS, voucher, invoice, transfer</td><td>Truthfully says it's not available on this line</td><td><span class="tag prompt">prompt</span> (no tool exists)</td></tr>
+        <tr><td>Finished</td><td><code>finish_call(goodbye)</code> → fixed thank-you</td><td><span class="tag prompt">prompt</span></td></tr>
+      </table>
+      <p class="note" style="margin-top:2mm;"><span class="tag prompt">prompt</span> = instruction the model follows (high reliability, not guaranteed). <span class="tag code">code</span> = checked by the app whatever the model does. Actions without a tool are impossible, not just discouraged. * search_knowledge appears only once a source is set to search mode.</p>
+    </div>
+  </div>
+  <div class="foot"><span>LSPcare · Twilio voice agent · technical reference</span><span>3</span></div>
+</section>
+
+<!-- ===================== PAGE 4: ONE TURN INSIDE ===================== -->
+<section class="page">
+  <p class="kicker">Inside one turn</p>
+  <h2>What is sent to the model, and what comes back</h2>
+  <p class="lede">Each caller turn rebuilds the request from the same parts. The fixed front part (rules + knowledge + tools) is cached by the API, so only the new conversation text is processed in full.</p>
+
+  <div class="grid" style="grid-template-columns: 0.95fr 1.05fr; gap:5mm;">
+    <svg viewBox="0 0 520 400" width="100%" style="display:block; height:118mm;" font-family="Segoe UI, Arial, sans-serif">
+      <text x="10" y="16" font-size="11.5" font-weight="700" fill="#14213d">Request layout (Claude Messages API, streamed)</text>
+      <rect x="10" y="26" width="500" height="52" rx="8" fill="#ece9f6" stroke="#c4bce4"/>
+      <text x="22" y="46" font-size="11" font-weight="700" fill="#14213d">tools</text>
+      <text x="22" y="64" font-size="9.5" fill="#5b6475">lookup_device · finish_call · get_guide(enum of guide IDs) · create_ticket (· search_knowledge)</text>
+      <rect x="10" y="84" width="500" height="118" rx="8" fill="#fbf0dc" stroke="#e7c98f"/>
+      <text x="22" y="104" font-size="11" font-weight="700" fill="#14213d">system</text>
+      <text x="22" y="122" font-size="9.5" fill="#5b6475">SYSTEM: role, tone, identification rules, hardware safety, clinical rule,</text>
+      <text x="22" y="137" font-size="9.5" fill="#5b6475">spoken style (no markdown), tickets, unavailable actions, injection resistance</text>
+      <text x="22" y="157" font-size="9.5" fill="#5b6475">+ SOURCE KB-PURCHASE · KB-PRICES · KB-UNKNOWN-HARDWARE · KB-ARM-FAULTS</text>
+      <text x="22" y="172" font-size="9.5" fill="#5b6475">  (core, ≈7.7k chars, hash-checked)</text>
+      <text x="22" y="190" font-size="9.5" fill="#5b6475">+ GUIDES AVAILABLE menu (reviewed one-line descriptions)</text>
+      <rect x="10" y="208" width="500" height="18" rx="4" fill="#0f8b8d"/>
+      <text x="260" y="221" text-anchor="middle" font-size="9.5" font-weight="700" fill="#fff">▲ cached prefix (cache_control ephemeral)</text>
+      <rect x="10" y="232" width="500" height="104" rx="8" fill="#f3f5f9" stroke="#d9dee7"/>
+      <text x="22" y="252" font-size="11" font-weight="700" fill="#14213d">messages</text>
+      <text x="22" y="270" font-size="9.5" fill="#5b6475">earlier turns: caller text · tool calls + results · spoken replies</text>
+      <text x="22" y="286" font-size="9.5" fill="#5b6475">(assistant text = what was actually spoken/heard)</text>
+      <text x="22" y="302" font-size="9.5" fill="#5b6475">+ this turn's tool calls so far (thinking blocks never kept)</text>
+      <text x="22" y="318" font-size="9.5" fill="#5b6475">+ newest caller sentence (≤4,000 chars)</text>
+      <rect x="10" y="342" width="500" height="52" rx="8" fill="#e3f3f3" stroke="#9ccfd0"/>
+      <text x="22" y="362" font-size="11" font-weight="700" fill="#14213d">options</text>
+      <text x="22" y="380" font-size="9.5" fill="#5b6475">model claude-sonnet-5-5 · effort low · adaptive thinking · max_tokens 16000</text>
+    </svg>
+
+    <div class="grid" style="grid-template-columns: 1fr; gap:3mm;">
+      <table class="t">
+        <tr><th>Setting</th><th>Current value</th><th>Why</th></tr>
+        <tr><td>Model</td><td><code>claude-sonnet-5-5</code></td><td>Fast, strong tool use; changeable via <code>--set anthropic_model=…</code></td></tr>
+        <tr><td>Effort / thinking</td><td><code>low</code>, adaptive</td><td>Skips thinking on most simple turns → quicker first word. <code>--set thinking=between_tools</code> turns it off</td></tr>
+        <tr><td>Streaming</td><td>on; text forwarded token by token</td><td>Caller hears the reply while it is still being generated</td></tr>
+        <tr><td>Caching</td><td>rules + knowledge + tools</td><td>Cheaper, faster repeat turns</td></tr>
+        <tr><td>Refusal fallback</td><td>server-side, <code>fallbacks: default</code></td><td>A declined turn can be retried on a fallback model</td></tr>
+        <tr><td>Tool inputs</td><td>streamed eagerly + exact-schema check in code</td><td>Invalid input is returned as an error and never run</td></tr>
+        <tr><td>Retries / timeout</td><td>0 retries · 25 s</td><td>No duplicate side-effects; fails fast to the error message</td></tr>
+        <tr><td>Limits</td><td>4 rounds/turn · 400 events · 15 min · 2 calls</td><td>Bounded cost and runaway protection</td></tr>
+      </table>
+      <div class="card" style="background:var(--soft)"><h3>Memory model</h3><p><b>Within a call:</b> earlier turns are resent each turn, including their tool calls and results, so the agent doesn't repeat lookups. The harness found this was missing and it was fixed on 26 Nov. <b>Between calls:</b> nothing, by design. Continuity comes from Zoho tickets. Thinking blocks are never carried across turns, which keeps the history valid for the API's thinking checks.</p></div>
+      <div class="card" style="background:var(--soft)"><h3>Per-turn log line</h3><p><code>[pilot] turn on …ab12cd: first word 820ms, total 2410ms, tools get_guide</code>. Timings only. <code>transcripts=on</code> adds the full transcript (saved privately).</p></div>
+    </div>
+  </div>
+  <div class="foot"><span>LSPcare · Twilio voice agent · technical reference</span><span>4</span></div>
+</section>
+
+<!-- ===================== PAGE 5: KNOWLEDGE + TICKETS ===================== -->
+<section class="page">
+  <p class="kicker">Knowledge and tickets</p>
+  <h2>Staged knowledge · guarded ticket creation</h2>
+
+  <div class="grid" style="grid-template-columns: 1fr 1fr; gap:6mm; margin-top:3mm;">
+    <div>
+      <svg viewBox="0 0 520 250" width="100%" style="display:block; height:66mm;" font-family="Segoe UI, Arial, sans-serif">
+        <defs><marker id="d" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0L10,5L0,10z" fill="#5b6475"/></marker></defs>
+        <rect x="8" y="8" width="150" height="80" rx="9" fill="#f3f5f9" stroke="#d9dee7"/>
+        <text x="83" y="32" text-anchor="middle" font-size="11.5" font-weight="700" fill="#14213d">registry.json</text>
+        <text x="83" y="50" text-anchor="middle" font-size="9" fill="#5b6475">version · readiness · export</text>
+        <text x="83" y="64" text-anchor="middle" font-size="9" fill="#5b6475">sha256 · description</text>
+        <rect x="8" y="104" width="150" height="56" rx="9" fill="#f3f5f9" stroke="#d9dee7"/>
+        <text x="83" y="128" text-anchor="middle" font-size="11.5" font-weight="700" fill="#14213d">content/*.md</text>
+        <text x="83" y="146" text-anchor="middle" font-size="9" fill="#5b6475">reviewed documents</text>
+        <rect x="190" y="40" width="130" height="90" rx="9" fill="#ece9f6" stroke="#c4bce4"/>
+        <text x="255" y="66" text-anchor="middle" font-size="11.5" font-weight="700" fill="#14213d">knowledge.py</text>
+        <text x="255" y="84" text-anchor="middle" font-size="9" fill="#5b6475">hash check every use</text>
+        <text x="255" y="98" text-anchor="middle" font-size="9" fill="#5b6475">DELIVERY plan</text>
+        <text x="255" y="114" text-anchor="middle" font-size="9" fill="#b23a3a">mismatch → refuse calls</text>
+        <line x1="160" y1="48" x2="188" y2="70" stroke="#5b6475" stroke-width="1.6" marker-end="url(#d)"/>
+        <line x1="160" y1="132" x2="188" y2="104" stroke="#5b6475" stroke-width="1.6" marker-end="url(#d)"/>
+        <rect x="352" y="8" width="160" height="66" rx="9" fill="#fbf0dc" stroke="#e7c98f"/>
+        <text x="432" y="28" text-anchor="middle" font-size="11" font-weight="700" fill="#14213d">core → every request</text>
+        <text x="432" y="45" text-anchor="middle" font-size="8.6" fill="#5b6475">PURCHASE · PRICES</text>
+        <text x="432" y="58" text-anchor="middle" font-size="8.6" fill="#5b6475">UNKNOWN-HW · ARM-FAULTS</text>
+        <rect x="352" y="84" width="160" height="66" rx="9" fill="#e4f2e9" stroke="#a9d3b7"/>
+        <text x="432" y="104" text-anchor="middle" font-size="11" font-weight="700" fill="#14213d">guide → get_guide(ID)</text>
+        <text x="432" y="121" text-anchor="middle" font-size="8.6" fill="#5b6475">TERMINAL-LSPC15MF</text>
+        <text x="432" y="134" text-anchor="middle" font-size="8.6" fill="#5b6475">TERMINAL-TOUCH-KEYS</text>
+        <rect x="352" y="160" width="160" height="66" rx="9" fill="#e3f3f3" stroke="#9ccfd0"/>
+        <text x="432" y="180" text-anchor="middle" font-size="11" font-weight="700" fill="#14213d">search → FTS5 index</text>
+        <text x="432" y="197" text-anchor="middle" font-size="8.6" fill="#5b6475">split at ## headings</text>
+        <text x="432" y="210" text-anchor="middle" font-size="8.6" fill="#5b6475">top 3 sections (none yet)</text>
+        <line x1="322" y1="70" x2="350" y2="40" stroke="#5b6475" stroke-width="1.6" marker-end="url(#d)"/>
+        <line x1="322" y1="86" x2="350" y2="116" stroke="#5b6475" stroke-width="1.6" marker-end="url(#d)"/>
+        <line x1="322" y1="110" x2="350" y2="190" stroke="#5b6475" stroke-width="1.6" marker-end="url(#d)"/>
+        <text x="8" y="196" font-size="9.5" fill="#14213d" font-weight="700">Limits</text>
+        <text x="8" y="212" font-size="9" fill="#5b6475">core ≤ 40,000 chars · guide ≤ 30,000 · search section ≤ 4,000</text>
+        <text x="8" y="228" font-size="9" fill="#5b6475">Excluded entirely: staff contacts, retired / reference-only entries</text>
+      </svg>
+      <div class="card" style="margin-top:2mm;"><h3>Adding or changing a document</h3>
+        <ul>
+          <li>Edit or create the file in <code>knowledge/content/</code> (Claude-assisted intake as before)</li>
+          <li>Registry entry: bump version, set <code>content_sha256</code>, <code>development_ready</code>, <code>export: true</code>, a clear <code>description</code> (this is the guide-menu text)</li>
+          <li>New source? Add <code>'ID': 'core' | 'guide' | 'search'</code> to <code>DELIVERY</code> in <code>knowledge.py</code></li>
+          <li>Run the tests, then restart</li>
+        </ul></div>
+    </div>
+
+    <div>
+      <svg viewBox="0 0 520 250" width="100%" style="display:block; height:66mm;" font-family="Segoe UI, Arial, sans-serif">
+        <defs><marker id="e" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0L10,5L0,10z" fill="#5b6475"/></marker></defs>
+        <g font-size="9.5" text-anchor="middle">
+          <rect x="6" y="6" width="120" height="44" rx="8" fill="#ece9f6" stroke="#c4bce4"/><text x="66" y="25" font-weight="700" fill="#14213d" font-size="10.5">create_ticket</text><text x="66" y="40" fill="#5b6475">from the model</text>
+          <rect x="150" y="6" width="150" height="44" rx="8" fill="#f3f5f9" stroke="#d9dee7"/><text x="225" y="25" font-weight="700" fill="#14213d" font-size="10.5">Already this call?</text><text x="225" y="40" fill="#5b6475">logged → same number</text>
+          <rect x="324" y="6" width="190" height="44" rx="8" fill="#fdecec" stroke="#e5b5b5"/><text x="419" y="25" font-weight="700" fill="#14213d" font-size="10.5">Guards</text><text x="419" y="40" fill="#5b6475">confirmed · fields · AU phone · no card no.</text>
+          <rect x="150" y="80" width="150" height="44" rx="8" fill="#fbf0dc" stroke="#e7c98f"/><text x="225" y="99" font-weight="700" fill="#14213d" font-size="10.5">Location check</text><text x="225" y="114" fill="#5b6475">inventory verified or not</text>
+          <rect x="324" y="80" width="190" height="44" rx="8" fill="#e3f3f3" stroke="#9ccfd0"/><text x="419" y="99" font-weight="700" fill="#14213d" font-size="10.5">Build body</text><text x="419" y="114" fill="#5b6475">[TEST] subject · escaped HTML · Phone</text>
+          <rect x="6" y="160" width="150" height="50" rx="8" fill="#f3f5f9" stroke="#d9dee7"/><text x="81" y="180" font-weight="700" fill="#14213d" font-size="10.5">dry_run</text><text x="81" y="196" fill="#5b6475">DRY-xxxxxx · local log</text>
+          <rect x="185" y="160" width="150" height="50" rx="8" fill="#e4f2e9" stroke="#a9d3b7"/><text x="260" y="180" font-weight="700" fill="#14213d" font-size="10.5">live → Zoho</text><text x="260" y="196" fill="#5b6475">token (cached) → POST</text>
+          <rect x="364" y="160" width="150" height="50" rx="8" fill="#f3f5f9" stroke="#d9dee7"/><text x="439" y="180" font-weight="700" fill="#14213d" font-size="10.5">off</text><text x="439" y="196" fill="#5b6475">tool not offered</text>
+        </g>
+        <g stroke="#5b6475" stroke-width="1.6" fill="none">
+          <line x1="128" y1="28" x2="148" y2="28" marker-end="url(#e)"/><line x1="302" y1="28" x2="322" y2="28" marker-end="url(#e)"/>
+          <path d="M419,52 L419,62 L225,62 L225,78" marker-end="url(#e)"/><line x1="302" y1="102" x2="322" y2="102" marker-end="url(#e)"/>
+          <path d="M419,126 L419,140 L81,140 L81,158" marker-end="url(#e)"/><path d="M260,140 L260,158" marker-end="url(#e)"/><path d="M439,140 L439,158" marker-end="url(#e)"/>
+        </g>
+        <text x="8" y="236" font-size="9" fill="#5b6475">Mode set with <tspan font-family="Consolas, monospace">configure.py --set tickets=dry_run|live|off</tspan> · currently <tspan font-weight="700" fill="#2e7d4f">live</tspan></text>
+      </svg>
+      <table class="t" style="margin-top:2mm;">
+        <tr><th>Zoho outcome</th><th>Call state</th><th>Model is told</th></tr>
+        <tr><td>Ticket id returned</td><td>logged (#number)</td><td>Read the number to the caller</td></tr>
+        <tr><td>Zoho answered with an error (4xx/5xx)</td><td>not logged; retry allowed</td><td>Apologise; don't claim it was logged</td></tr>
+        <tr><td>Sent, but reply lost / timed out</td><td><b>unconfirmed</b>; no further attempts</td><td>Don't retry; support team will check</td></tr>
+        <tr><td>Guard failed</td><td>unchanged</td><td>The specific reason (e.g. not_confirmed)</td></tr>
+      </table>
+      <p class="note" style="margin-top:1.5mm;">Department and org always come from <code>zoho-desk.json</code>, never from model input. Access token is refreshed with the stored refresh token and cached until about 2 minutes before expiry. No redirects are followed.</p>
+    </div>
+  </div>
+  <div class="foot"><span>LSPcare · Twilio voice agent · technical reference</span><span>5</span></div>
+</section>
+
+<!-- ===================== PAGE 6: OPERATIONS ===================== -->
+<section class="page">
+  <p class="kicker">Operations</p>
+  <h2>Files, settings and commands</h2>
+
+  <div class="grid" style="grid-template-columns: 1.1fr 1fr; gap:6mm; margin-top:3mm;">
+    <div>
+      <table class="t">
+        <tr><th>File (voice-agent/)</th><th>Responsibility</th></tr>
+        <tr><td><code>app.py</code></td><td>HTTP/WebSocket endpoints, signature checks, sessions, SYSTEM prompt, voice settings, tool dispatch, timing log</td></tr>
+        <tr><td><code>conversation.py</code></td><td>Shared turn engine (phone + harness): history, Claude/OpenAI loops, interruption repair, events</td></tr>
+        <tr><td><code>claude_reply.py</code></td><td>Claude request options, streaming, tool rounds, refusal and invalid-input handling</td></tr>
+        <tr><td><code>tools.py</code></td><td>Tool specs once, converted per provider; exact-schema validation</td></tr>
+        <tr><td><code>knowledge.py</code></td><td>Registry-driven core / guide / search delivery with hash checks</td></tr>
+        <tr><td><code>tickets.py</code></td><td>create_ticket guards, body building, per-call state, dry-run log</td></tr>
+        <tr><td><code>zoho_desk.py</code></td><td>Zoho OAuth + ticket POST; <code>--check</code>, <code>--test-ticket</code></td></tr>
+        <tr><td><code>configure.py</code></td><td>Private credentials, <code>--set</code>, <code>--public-url</code>, <code>--update-number</code>, tunnel health check</td></tr>
+        <tr><td><code>transcripts.py</code></td><td>Live transcript in the pilot window + private per-call file; <code>--follow</code>, <code>--show</code></td></tr>
+        <tr><td><code>harness.py · scenarios.json</code></td><td>Conversation test harness and its 20 scenarios (see page 7)</td></tr>
+        <tr><td><code>run.ps1</code></td><td>One-terminal launcher: tunnel → URL → server → number → READY banner</td></tr>
+        <tr><td><code>test_*.py</code></td><td>51 offline tests with fake Twilio, Zoho and AI</td></tr>
+        <tr><td class="mono">../mock-backend/static_inventory.py · private_files.py</td><td>Shared inventory lookup; private-folder location and owner-only ACLs</td></tr>
+      </table>
+    </div>
+    <div class="grid" style="gap:3mm;">
+      <table class="t">
+        <tr><th><code>configure.py --set</code> key</th><th>Values</th><th>Applies</th></tr>
+        <tr><td><code>anthropic_model</code></td><td>e.g. claude-sonnet-5-5</td><td>next turn</td></tr>
+        <tr><td><code>effort</code></td><td>low · medium · high · xhigh · max</td><td>next turn</td></tr>
+        <tr><td><code>thinking</code></td><td>adaptive · between_tools</td><td>next turn</td></tr>
+        <tr><td><code>tickets</code></td><td>dry_run · live · off</td><td>next turn</td></tr>
+        <tr><td><code>voice</code>, <code>ttsProvider</code>, <code>language</code>, <code>hints</code></td><td>ConversationRelay settings</td><td>next call</td></tr>
+        <tr><td><code>ticket_subject_prefix</code></td><td>default "[TEST] "</td><td>next ticket</td></tr>
+        <tr><td><code>transcripts</code></td><td>on · off (currently on)</td><td>next call</td></tr>
+      </table>
+      <div class="card" style="background:var(--soft)"><h3>Everyday commands (from voice-agent, with .venv\Scripts\python.exe)</h3>
+        <ul>
+          <li><code>run.ps1</code>: start everything; wait for the green READY banner</li>
+          <li><code>configure.py --update-number</code>: repoint the number if NOT READY</li>
+          <li><code>configure.py --set effort=medium</code>: change a setting</li>
+          <li><code>zoho_desk.py --check</code>: read-only Zoho sign-in test</li>
+          <li><code>transcripts.py --follow</code>: watch calls live</li>
+          <li><code>harness.py</code> · <code>--only ID,…</code> · <code>--set thinking=…</code>: conversation tests</li>
+          <li><code>-m unittest test_pilot test_claude test_stages test_harness</code>: offline tests</li>
+        </ul></div>
+      <div class="card" style="border-left:4px solid var(--amber);"><h3>Known pilot limitations</h3>
+        <ul>
+          <li>Quick-tunnel URL changes on every restart (fixed address planned)</li>
+          <li>Runs on one PC; in-memory state; 2 concurrent calls</li>
+          <li>No SMS, vouchers, payments or live transfer yet</li>
+          <li>Twilio's default speech recognition settings, apart from language and hints</li>
+          <li>Transcripts are on for the staff pilot: turn them off before any real patient data</li>
+        </ul></div>
+    </div>
+  </div>
+  <div class="foot"><span>LSPcare · Twilio voice agent · technical reference</span><span>6</span></div>
+</section>
+
+<!-- ===================== PAGE 7: TESTING ===================== -->
+<section class="page">
+  <p class="kicker">Testing and observability</p>
+  <h2>Conversation test harness</h2>
+  <p class="lede">Runs the <b>same engine as the phone</b> in text, so behaviour changes can be checked in minutes for cents, before anyone calls. Speech and Twilio are not covered here; phone calls and live transcripts cover those.</p>
+
+  <div class="grid" style="grid-template-columns: 1.05fr 1fr; gap:5mm;">
+    <div>
+      <svg viewBox="0 0 540 250" width="100%" style="display:block; height:64mm;" font-family="Segoe UI, Arial, sans-serif">
+        <defs><marker id="h" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0L10,5L0,10z" fill="#5b6475"/></marker></defs>
+        <rect x="6" y="10" width="120" height="60" rx="9" fill="#f3f5f9" stroke="#d9dee7"/>
+        <text x="66" y="34" text-anchor="middle" font-size="11" font-weight="700" fill="#14213d">scenarios.json</text>
+        <text x="66" y="52" text-anchor="middle" font-size="9" fill="#5b6475">18 · script or brief</text>
+        <rect x="6" y="100" width="120" height="60" rx="9" fill="#ece9f6" stroke="#c4bce4"/>
+        <text x="66" y="124" text-anchor="middle" font-size="11" font-weight="700" fill="#14213d">Simulated caller</text>
+        <text x="66" y="142" text-anchor="middle" font-size="9" fill="#5b6475">Claude Haiku 5.5</text>
+        <rect x="160" y="40" width="170" height="110" rx="10" fill="#e3f3f3" stroke="#9ccfd0" stroke-width="2"/>
+        <text x="245" y="64" text-anchor="middle" font-size="11.5" font-weight="700" fill="#14213d">conversation.py</text>
+        <text x="245" y="82" text-anchor="middle" font-size="9" fill="#0f8b8d" font-weight="600">same engine as the phone</text>
+        <text x="245" y="102" text-anchor="middle" font-size="9" fill="#5b6475">rules · knowledge · tools</text>
+        <text x="245" y="118" text-anchor="middle" font-size="9" fill="#5b6475">Sonnet 5.5 · real inventory</text>
+        <text x="245" y="134" text-anchor="middle" font-size="9" fill="#b23a3a">tickets forced to dry-run</text>
+        <rect x="370" y="10" width="164" height="60" rx="9" fill="#e4f2e9" stroke="#a9d3b7"/>
+        <text x="452" y="32" text-anchor="middle" font-size="11" font-weight="700" fill="#14213d">Hard checks</text>
+        <text x="452" y="48" text-anchor="middle" font-size="8.6" fill="#5b6475">tools · ticket · ending · phrases</text>
+        <text x="452" y="61" text-anchor="middle" font-size="8.6" fill="#5b6475">+ no markdown · no card numbers</text>
+        <rect x="370" y="86" width="164" height="60" rx="9" fill="#fbf0dc" stroke="#e7c98f"/>
+        <text x="452" y="108" text-anchor="middle" font-size="11" font-weight="700" fill="#14213d">Judge</text>
+        <text x="452" y="124" text-anchor="middle" font-size="8.6" fill="#5b6475">Haiku 5.5 · structured verdicts</text>
+        <text x="452" y="137" text-anchor="middle" font-size="8.6" fill="#5b6475">+ approved source text</text>
+        <rect x="370" y="162" width="164" height="50" rx="9" fill="#f3f5f9" stroke="#d9dee7"/>
+        <text x="452" y="183" text-anchor="middle" font-size="11" font-weight="700" fill="#14213d">report.md · results.json</text>
+        <text x="452" y="200" text-anchor="middle" font-size="8.6" fill="#5b6475">build/harness/&lt;time&gt;/</text>
+        <rect x="160" y="172" width="170" height="40" rx="9" fill="#fdecec" stroke="#e5b5b5"/>
+        <text x="245" y="190" text-anchor="middle" font-size="10.5" font-weight="700" fill="#14213d">Cost meter</text>
+        <text x="245" y="205" text-anchor="middle" font-size="8.6" fill="#5b6475">stops before --budget (US$0.50)</text>
+        <g stroke="#5b6475" stroke-width="1.6" fill="none">
+          <line x1="128" y1="50" x2="158" y2="70" marker-end="url(#h)"/>
+          <path d="M128,125 L158,115" marker-end="url(#h)"/><path d="M160,128 L130,138" marker-end="url(#h)"/>
+          <line x1="332" y1="70" x2="368" y2="45" marker-end="url(#h)"/>
+          <line x1="332" y1="100" x2="368" y2="114" marker-end="url(#h)"/>
+          <line x1="452" y1="148" x2="452" y2="160" marker-end="url(#h)"/>
+          <line x1="245" y1="152" x2="245" y2="170" stroke-dasharray="4 3" marker-end="url(#h)"/>
+        </g>
+        <text x="6" y="240" font-size="9" fill="#5b6475">Coverage: identification · hardware guides · arm · prices · buying · tickets · card attempts · clinical · unavailable features · injection</text>
+      </svg>
+      <div class="card" style="margin-top:2mm;"><h3>Commands (voice-agent, .venv\Scripts\python.exe)</h3>
+        <ul>
+          <li><code>harness.py</code>: all scenarios (≈ US$0.33) · <code>--list</code> · <code>--only HW-01,TIX-01</code> · <code>--tag safety</code></li>
+          <li><code>harness.py --repeat 3</code>: run each scenario several times (AI replies vary)</li>
+          <li><code>harness.py --set thinking=between_tools</code>: try a setting without changing the live pilot</li>
+          <li><code>transcripts.py --follow</code>: watch real calls live (pilot, fictional details)</li>
+        </ul></div>
+    </div>
+
+    <div class="grid" style="gap:3mm;">
+      <table class="t">
+        <tr><th>Run (26 Nov)</th><th>Passed</th><th>Cost</th><th>First word*</th></tr>
+        <tr><td>Baseline, 18 scenarios</td><td>12/17 (budget stop)</td><td>$0.47</td><td>3.9 s median</td></tr>
+        <tr><td>After fixes, 18 scenarios</td><td>15/18 → 17/18</td><td>$0.33</td><td>2.2 s median</td></tr>
+        <tr><td>9 scenarios · low effort, adaptive (current)</td><td>8/9</td><td>$0.17</td><td>2.3 s median · 3.8 s slow 10%</td></tr>
+        <tr><td>9 scenarios · thinking off</td><td>7/9</td><td>$0.18</td><td>2.2 s median · <b>2.6 s</b> slow 10%</td></tr>
+      </table>
+      <p class="note" style="margin:0;">* Text only, from caller turn to first word of the reply; speech recognition and voice add to this on the phone. Turns that used a tool: 3.6 s (current) vs 2.4 s (thinking off), median. Single runs; small sample.</p>
+      <div class="card" style="border-left:4px solid var(--teal);"><h3>Found and fixed by the harness</h3>
+        <ul>
+          <li>Tool results were dropped between turns, so the agent re-ran lookups and guides every turn (slow, costly, odd apologies). Now kept in history.</li>
+          <li>Written formatting (bold, numbered lists) in spoken replies. A new spoken-style rule plus a check.</li>
+          <li>Judge misread approved steps as invented. The judge now sees the approved source text.</li>
+        </ul></div>
+      <div class="card" style="border-left:4px solid var(--amber);"><h3>Open points</h3>
+        <ul>
+          <li>Sometimes asks two related questions in one reply (ID-01)</li>
+          <li>With thinking off, one formatting slip (<code>**bold**</code>) seen in 9 scenarios</li>
+          <li>Harness does not test speech recognition, voice or barge-in timing; phone checks still needed</li>
+        </ul></div>
+    </div>
+  </div>
+  <div class="foot"><span>LSPcare · Twilio voice agent · technical reference</span><span>7</span></div>
+</section>
+
+</body>
+</html>

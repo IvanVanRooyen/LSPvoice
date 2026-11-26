@@ -1,0 +1,240 @@
+{
+  "library_version": "1.0",
+  "scope": "development preparation only",
+  "entries": [
+    {
+      "id": "KB-PURCHASE",
+      "name": "LSPcare bedside screen: buying entertainment",
+      "version": "1.1",
+      "category": "purchase",
+      "path": "content/buying-entertainment.md",
+      "scope": "Screens with a Click to Pay panel on the home screen; labels observed on LSPC15mf / LSPcare 6.0 (2026-11-24) and consistent with SRC-005b; other layouts clarify/support",
+      "readiness": "development_ready",
+      "owner_role": "Product owner: prototype curation; technical/business approval as applicable",
+      "reviewed_date": "2026-11-25",
+      "approval": "Product owner 2026-11-25: question-mark icon confirmed as the help control; labels accepted (DOC-002 proposal 10). Synthetic development only; no patient-pilot approval. v1.0 archived at content/archive/buying-entertainment-v1.0.md",
+      "source_refs": [
+        "SRC-005b",
+        "SRC-ITERATION-1-MANIFEST"
+      ],
+      "target_nodes": [
+        "5"
+      ],
+      "export": true,
+      "description": "Navigation and labels for Click to Pay, packages, Order, Card/QR/Voucher, going back, History, time left, ? help icon and Device ID; defers payment details to the screen.",
+      "content_sha256": "f927734376efcb68f3b43d72deaf412f60fbf078d14669fe66cce2f30b403c02",
+      "review_notes": "v1.1 replaces \"HELP\" with the question-mark icon, documents EXPIRED/No active package, the back arrow, History, and defer-to-screen rules. Drops the tv.lsp.io voucher site and the unobserved red reminder. In-development items stay in interface-exploration/12 register.",
+      "upstream_source_refs": [
+        "SRC-005b",
+        "SRC-011a"
+      ],
+      "evidence_note": "Reviewed curated export and Product owner confirmations recorded in supplied manifest; new upstream originals not independently checked in this repository."
+    },
+    {
+      "id": "KB-PRICES",
+      "name": "LSPcare entertainment prices shown on the 15.6-inch terminal",
+      "version": "1.1",
+      "category": "prices",
+      "path": "content/prices-and-concessions.md",
+      "scope": "Prices observed on LSPC15mf office demo (MF15S), LSPcare 6.0, 2026-11-24; may differ by hospital and are in development; caller's screen prevails",
+      "readiness": "development_ready",
+      "owner_role": "Product owner: prototype curation; technical/business approval as applicable",
+      "reviewed_date": "2026-11-24",
+      "approval": "Product owner instructed 2026-11-24 to use the live prices observed on the terminal (DOC-002). Synthetic development only; no patient-pilot approval. v1.0 archived at content/archive/prices-and-concessions-v1.0.md",
+      "source_refs": [
+        "SRC-005b",
+        "SRC-ITERATION-1-MANIFEST"
+      ],
+      "target_nodes": [
+        "5"
+      ],
+      "export": true,
+      "description": "Public and concession prices and lengths shown on the 15.6-inch terminal; screen prevails if different; no eligibility, discount or card-detail handling.",
+      "content_sha256": "d04bba49e120d49522277dc1487a990a545f7712a6d28360b145cf7cc8dec1f7",
+      "review_notes": "v1.1 replaces guide prices with terminal prices. Differences from SRC-005b: concession 4 Days $36.00 (guide $30.00); 1 Week shown as 144 hours. Pricing still in development (register R-01..R-03). Bland development source still holds v1.0 until an operator replaces it.",
+      "upstream_source_refs": [
+        "SRC-011a",
+        "SRC-011b",
+        "SRC-005b"
+      ],
+      "evidence_note": "Reviewed curated export and Product owner confirmations recorded in supplied manifest; new upstream originals not independently checked in this repository."
+    },
+    {
+      "id": "KB-UNKNOWN-HARDWARE",
+      "name": "LSPcare unknown hardware: clarification and support fallback",
+      "version": "1.0",
+      "category": "unknown",
+      "path": "content/unknown-hardware.md",
+      "scope": "Unknown/unverified hardware; no model-specific physical instructions",
+      "readiness": "development_ready",
+      "owner_role": "Product owner: prototype curation; technical/business approval as applicable",
+      "reviewed_date": "2026-11-23",
+      "approval": "Source-reviewed for synthetic development only; no patient-pilot approval",
+      "source_refs": [
+        "SRC-005a",
+        "SRC-ITERATION-1-MANIFEST"
+      ],
+      "target_nodes": [
+        "9"
+      ],
+      "export": true,
+      "description": "Unknown setup and black screen: avoid invented controls or physical steps; clarify and offer truthful support.",
+      "content_sha256": "32ec058ef1ae744ae7ce6b9340e9ef27125bd94c961efb5757e78b4c26f3d998",
+      "upstream_source_refs": [
+        "SRC-005a"
+      ],
+      "evidence_note": "Reviewed curated export and Product owner confirmations recorded in supplied manifest; new upstream originals not independently checked in this repository."
+    },
+    {
+      "id": "KB-HARDWARE-REPORT",
+      "name": "Management test report awaiting hardware profile",
+      "version": "1.0",
+      "category": "hardware",
+      "path": "content/terminal-report-awaiting-profile.md",
+      "scope": "Terminal in an internal management test; exact model/deployment unknown",
+      "readiness": "retired",
+      "owner_role": "Product owner: prototype curation; technical/business approval as applicable",
+      "reviewed_date": "2026-11-23",
+      "approval": "Source-reviewed for synthetic development only; no patient-pilot approval",
+      "source_refs": [
+        "SRC-005a"
+      ],
+      "target_nodes": [],
+      "export": false,
+      "description": "Internal evidence to map to a confirmed model with ICT; excluded from upload.",
+      "content_sha256": "45af6d55852046dad1c83c5f3a6c35abe09a2d8021eda2fb7992d7bac16e4829"
+    },
+    {
+      "id": "KB-VOUCHER-REFERENCE",
+      "name": "Voucher policy and open decisions: internal workflow reference",
+      "version": "1.0",
+      "category": "voucher",
+      "path": "content/voucher-policy-reference.md",
+      "scope": "Confirmed prototype policy plus unresolved business details; explicit steps remain authoritative",
+      "readiness": "reference_only",
+      "owner_role": "Product owner: prototype curation; technical/business approval as applicable",
+      "reviewed_date": "2026-11-23",
+      "approval": "Source-reviewed for synthetic development only; no patient-pilot approval",
+      "source_refs": [
+        "SRC-005c",
+        "SRC-007"
+      ],
+      "target_nodes": [],
+      "export": false,
+      "description": "Internal reference for review; not an Agent source or authority for backend decisions.",
+      "content_sha256": "7628429c24e6fcbb42af234e829f5d1701f2f3f6460336e956e32792dba2e734"
+    },
+    {
+      "id": "KB-ARM-FAULTS",
+      "name": "LSPcare bedside screen arm: loose, dropping or not holding position",
+      "version": "1.0",
+      "category": "hardware",
+      "path": "content/bedside-arm-faults.md",
+      "scope": "All LSPcare bedside arms (1200, 1600, 1982 mm); rule identical for every arm; model per bed not recorded",
+      "readiness": "development_ready",
+      "owner_role": "Product owner: prototype curation; technical/business approval as applicable",
+      "reviewed_date": "2026-11-25",
+      "approval": "Product owner answered DOC-003 Q4/Q5 on 2026-11-25: no arm troubleshooting; say please don't adjust it, we'll arrange support; safety notes omitted. Synthetic development only; no patient-pilot approval",
+      "source_refs": [
+        "SRC-ITERATION-1-MANIFEST"
+      ],
+      "target_nodes": [
+        "9"
+      ],
+      "export": true,
+      "description": "Use when a caller says the screen arm is dropping, sagging, loose, stiff or will not stay in place. No adjustment steps; arrange support.",
+      "review_notes": "Scoped extract. Installer procedures, load and wall specifications are excluded from the agent text; see hardware/arm-profiles-DOC-003-draft.md.",
+      "content_sha256": "988786d0f688ca68f8ad09645824a3d314b81f392e762bbc5f8e27c803c482aa",
+      "upstream_source_refs": [
+        "SRC-019",
+        "SRC-020",
+        "SRC-021"
+      ],
+      "evidence_note": "Reviewed curated export and Product owner confirmations recorded in supplied manifest; new upstream originals not independently checked in this repository."
+    },
+    {
+      "id": "KB-STAFF-CONTACTS",
+      "name": "LSP contact details for hospital staff (not for patients)",
+      "version": "1.1",
+      "category": "contacts",
+      "path": "content/staff-contacts.md",
+      "scope": "Callers who state they are hospital staff (nurse, ward clerk, maintenance manager, engineering, other hospital staff); everyone else is treated as a patient and gets no contact details",
+      "readiness": "development_ready",
+      "owner_role": "Product owner: prototype curation; technical/business approval as applicable",
+      "reviewed_date": "2026-11-25",
+      "approval": "Product owner 2026-11-25: contacts (DOC-003 Q2); a stated staff role is sufficient; otherwise assume patient; final support number deferred. Synthetic development only; no patient-pilot approval",
+      "source_refs": [
+        "SRC-ITERATION-1-MANIFEST"
+      ],
+      "target_nodes": [
+        "9"
+      ],
+      "export": false,
+      "description": "Support, equipment and sales emails and the LSP office line, for callers who say they are hospital staff only.",
+      "review_notes": "Supersedes the conflicting addresses in SRC-012/017/022 (support@lifestylepanel.com, info@lsp.io, sales@lsp.io as support, 1800 426 190). Knowledge retrieval cannot enforce audience; do not attach until the pathway separates staff callers.",
+      "content_sha256": "4bc84fc82385c4bee3e67c2274575d9b3e732e2168e85e0e714ea248862e758f",
+      "upstream_source_refs": [
+        "SRC-012",
+        "SRC-022"
+      ],
+      "evidence_note": "Reviewed curated export and Product owner confirmations recorded in supplied manifest; new upstream originals not independently checked in this repository.",
+      "attachment_hold": "Do not attach until pathway separates hospital staff from patients; agent-wide retrieval currently reaches everyone."
+    },
+    {
+      "id": "KB-TERMINAL-LSPC15MF",
+      "name": "LSPC15mf 15.6-inch bedside terminal (orange button at the bottom centre)",
+      "version": "1.2",
+      "category": "hardware",
+      "path": "content/terminal-lspc15mf.md",
+      "scope": "LSPC15mf only, identified by the orange button at the bottom centre (caller description accepted; bed map not required). Other models use KB-UNKNOWN-HARDWARE",
+      "readiness": "development_ready",
+      "owner_role": "Product owner: prototype curation; technical/business approval as applicable",
+      "reviewed_date": "2026-11-25",
+      "approval": "Hardware facts confirmed by Product owner 2026-11-24 (no status light; orange button and short side press = screen off/on; long side press = terminal off/on; no optional extras). Product owner 2026-11-25 (DOC-004): caller description may identify the model; orange-button black-screen step approved. Synthetic development only; no patient-pilot approval",
+      "source_refs": [
+        "SRC-ITERATION-1-MANIFEST"
+      ],
+      "target_nodes": [
+        "9"
+      ],
+      "export": true,
+      "description": "Use only when the caller confirms an orange button in the middle of the frame below the screen: no status light, what each button does, volume, headphones and Bluetooth pairing, no remote/handset/NFC/nurse call, and the black-screen step.",
+      "review_notes": "DOC-004. v1.1 (before any ingestion) adds Product owner 2026-11-25 answers: side volume buttons usable by patients; 3.5 mm jack works; Bluetooth headphones supported (pairing steps unconfirmed, not given); headphones not supplied; buttons normally reachable from bed. v1.2: Bluetooth pairing steps from Product owner 2026-11-25 (APPS > Bluetooth > switch on > Scan & clear paired devices); observed on MF15S as a BLUETOOTH tile in APPS (M46), inside Settings on WSLHD (S23).",
+      "content_sha256": "bb42f9b3f4ba48f4315987a526d7b7d749253d217863f36d26e34b7118d2ee22",
+      "upstream_source_refs": [
+        "SRC-008",
+        "SRC-023"
+      ],
+      "evidence_note": "Reviewed curated export and Product owner confirmations recorded in supplied manifest; new upstream originals not independently checked in this repository."
+    },
+    {
+      "id": "KB-TERMINAL-TOUCH-KEYS",
+      "name": "21-inch bedside terminals (touch symbols along the bottom, no orange button)",
+      "version": "1.1",
+      "category": "hardware",
+      "path": "content/terminal-touch-key-models.md",
+      "scope": "21-inch terminals, two hardware versions recognised by caller description (A: black glass, eight symbols, no physical buttons; B: white frame with LSPcare logo, nine symbols, rear power button)",
+      "readiness": "development_ready",
+      "owner_role": "Product owner: prototype curation; technical/business approval as applicable",
+      "reviewed_date": "2026-11-25",
+      "approval": "Product owner 2026-11-25: both photos are 21-inch terminals with different hardware; power symbol (A) and small screen symbol (B) turn the screen on/off, short touch safe; volume and reading lamp usable; sun = brightness; headphone jack rear middle below arm mount; wired and Bluetooth headphones; patients may pair Bluetooth; handset is internal demo only. Synthetic development only",
+      "source_refs": [
+        "SRC-ITERATION-1-MANIFEST"
+      ],
+      "target_nodes": [
+        "9"
+      ],
+      "export": true,
+      "description": "Recognise the two 21-inch versions by their touch symbols; black-screen step (power symbol or small screen symbol); reading lamp, volume, brightness, headphones and Bluetooth pairing; never orange-button steps or the rear power button.",
+      "review_notes": "DOC-004. v1.1 replaces the recognition-only v1.0 (never ingested). Model name not stated by Product owner; SRC-009 (LSPC21ms) layout matches version A. Rear power button deliberately excluded from caller steps (its function and permitted use not stated).",
+      "content_sha256": "fd10c43e3710961285ccd9be58efb1f579bc5700a3d6b1c3f259b613671a79c5",
+      "upstream_source_refs": [
+        "SRC-024",
+        "SRC-025",
+        "SRC-009"
+      ],
+      "evidence_note": "Reviewed curated export and Product owner confirmations recorded in supplied manifest; new upstream originals not independently checked in this repository."
+    }
+  ],
+  "updated": "2026-11-25"
+}
