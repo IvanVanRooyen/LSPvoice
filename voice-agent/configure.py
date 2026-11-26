@@ -44,6 +44,21 @@ def apply_setting(config, pair):
     print(f'{key} set to {value!r}.')
 
 
+def save_config(config, path=None):
+    """Write the private config atomically, readable by the current user only."""
+    path = Path(path or CONFIG)
+    if path.is_symlink() or path.parent.is_symlink():
+        raise ValueError('Refusing symlink configuration')
+    make_private_dir(path.parent)
+    temp = path.with_suffix('.json.new')
+    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, 'w', encoding='utf-8', newline='\n') as stream:
+        restrict(temp)
+        json.dump(config, stream, indent=2)
+        stream.write('\n')
+    os.replace(temp, path)
+
+
 def validate_url(value):
     url = urlsplit(value)
     if (url.scheme != 'https' or not url.hostname or url.username or url.password
@@ -181,14 +196,7 @@ def main():
                   'public_base': ''}
         if not config['account_sid'].startswith('AC') or not config['auth_token'] or not config['openai_api_key']:
             raise ValueError('Enter the real Twilio Account SID/auth token and OpenAI API key privately.')
-    make_private_dir(CONFIG.parent)
-    temp = CONFIG.with_suffix('.json.new')
-    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(fd, 'w', encoding='utf-8') as stream:
-        restrict(temp)
-        json.dump(config, stream, indent=2)
-        stream.write('\n')
-    os.replace(temp, CONFIG)
+    save_config(config)
     print('Private configuration saved outside the repository.')
     print('Calls are answered by:', 'Claude ' + config['anthropic_model'] if config.get('provider') == 'anthropic'
           else 'OpenAI ' + config['model'])

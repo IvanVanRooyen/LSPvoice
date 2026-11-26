@@ -12,7 +12,7 @@ Three layers, each for a different job.
 
 ```powershell
 cd voice-agent
-.venv\Scripts\python.exe -m unittest test_pilot test_claude test_stages test_harness test_pilot_loop
+.venv\Scripts\python.exe -m unittest test_pilot test_claude test_stages test_harness test_pilot_loop test_dashboard
 cd ..\mock-backend
 .venv\Scripts\python.exe -m unittest test_static_inventory test_vouchers
 ```
@@ -91,6 +91,10 @@ spoken answers, needs first, approved steps only, clinical redirect, no card det
 about unavailable features, ticket read-back, no promises). The judge gets the approved sources
 the call used. Calls with a failed rule or a spoken report are listed first in
 `private-config/reviews/<time>.md`. Cost: about 1 cent per call, capped (default US$0.20 a run).
+
+**Dashboard:** `voice-agent\dashboard.py` (http://127.0.0.1:8102, this PC only) shows all of the
+above in one place: calls needing attention, transcripts, reports, reviews and test runs, with
+buttons to review, run tests and turn a call into a scenario.
 
 **Triage cycle (weekly, or after each batch of reports):**
 1. Run `review.py` and read the report, plus Teams reports from testers.

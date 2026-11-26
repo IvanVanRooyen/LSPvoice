@@ -16,6 +16,7 @@ decides each reply.
 | `tickets.py`, `zoho_desk.py` | Guarded `create_ticket` and the Zoho Desk client |
 | `transcripts.py` | Live call transcripts (pilot window + private file), lookup by call reference |
 | `pilot_log.py` | Staff pilot: call references, version stamps, spoken problem reports |
+| `dashboard.py` | Local admin dashboard: calls, reports, reviews, tests, settings, knowledge |
 | `review.py` | Automatic review of staff calls against the agent's rules ([docs/testing.md](../docs/testing.md)) |
 | `harness.py`, `scenarios.json` | Conversation test harness ([docs/testing.md](../docs/testing.md)) |
 | `configure.py` | Private credentials and settings |
@@ -47,6 +48,18 @@ powershell -ExecutionPolicy Bypass -File run.ps1    # wait for the green READY b
 
 If the banner says NOT READY: `.venv\Scripts\python.exe configure.py --update-number`.
 
+## Dashboard
+
+```powershell
+.venv\Scripts\python.exe dashboard.py    # opens http://127.0.0.1:8102
+```
+
+One place to see calls and transcripts, spoken problem reports, automatic reviews and test runs,
+to start a review or a test run (with a cost cap), turn a call into a test scenario, change
+non-secret settings and check the knowledge library. It runs on this PC only: it listens on
+127.0.0.1, is not reachable through the tunnel, rejects other host names, needs a per-session
+token for every action, and never shows credentials. Run it in its own window alongside `run.ps1`.
+
 ## Settings
 
 Change with `configure.py --set KEY=VALUE`. These apply on the next call with no restart.
@@ -68,7 +81,7 @@ Code changes need a restart.
 ## Test
 
 ```powershell
-.venv\Scripts\python.exe -m unittest test_pilot test_claude test_stages test_harness test_pilot_loop
+.venv\Scripts\python.exe -m unittest test_pilot test_claude test_stages test_harness test_pilot_loop test_dashboard
 .venv\Scripts\python.exe harness.py --list
 .venv\Scripts\python.exe harness.py --only HW-01 --set thinking=adaptive
 .venv\Scripts\python.exe review.py                 # review new staff calls (capped at US$0.20)
