@@ -63,8 +63,21 @@ def _tool_summary(name, args, result):
     return f'{name} → {_short(json.dumps(result), 80)}'
 
 
+USAGE_KEYS = {'input_tokens': 'input', 'output_tokens': 'output',
+              'cache_read_input_tokens': 'cache_read', 'cache_creation_input_tokens': 'cache_write'}
+
+
+def usage_record(model, usage):
+    """Token counts from one API response, as saved in a 'usage' transcript event."""
+    return {'model': str(model or 'unknown'),
+            **{short: int(getattr(usage, key, 0) or 0) for key, short in USAGE_KEYS.items()}}
+
+
 def format_event(record):
+    """One readable line for a transcript record, or None for records not shown in the terminal."""
     kind, at = record.get('kind'), record.get('at', '')[11:19]
+    if kind == 'usage':
+        return None
     if kind == 'greeting':
         return f'{at}  AGENT   │ {record["text"]}  (greeting)'
     if kind == 'caller':
@@ -120,8 +133,9 @@ class CallTranscript:
         record = {'at': datetime.now().isoformat(timespec='seconds'), 'kind': kind, **data}
         with self.path.open('a', encoding='utf-8') as handle:
             handle.write(json.dumps(record, ensure_ascii=False, default=str) + '\n')
-        if self.echo:
-            print(format_event(record), file=sys.stderr, flush=True)
+        line = format_event(record) if self.echo else None
+        if line:
+            print(line, file=sys.stderr, flush=True)
 
 
 def _calls():
@@ -140,6 +154,51 @@ def summary(path):
             'flagged': bool(reports) or bool(closed.get('flagged')), 'reports': reports, 'records': records}
 
 
+def _seconds(a, b):
+    try:
+        return max(0, round((datetime.fromisoformat(b) - datetime.fromisoformat(a)).total_seconds()))
+    except (TypeError, ValueError):
+        return None
+
+
+def stats(records):
+    """Call figures for the dashboard: duration, reply timing, tools, ticket and token totals."""
+    started = next((r for r in records if r.get('kind') == 'started'), {})
+    closed = next((r for r in records if r.get('kind') == 'closed'), None)
+    turns = [r for r in records if r.get('kind') == 'turn']
+    firsts = [t['first_word_ms'] for t in turns if t.get('first_word_ms') is not None]
+    totals = [t['total_ms'] for t in turns if t.get('total_ms') is not None]
+    tools = [r for r in records if r.get('kind') == 'tool']
+    ticket = None
+    for r in tools:
+        result = r.get('result') or {}
+        inner = result.get('result') if r.get('name') == 'flow_confirm' else result
+        if isinstance(inner, dict) and inner.get('ticket_logged'):
+            ticket = {'number': inner.get('ticket_number'), 'dry_run': bool(inner.get('dry_run'))}
+    usages = [r for r in records if r.get('kind') == 'usage']
+    by_model = {}
+    for u in usages:
+        entry = by_model.setdefault(u.get('model', 'unknown'), {**{k: 0 for k in USAGE_KEYS.values()}, 'requests': 0})
+        entry['requests'] += 1
+        for short in USAGE_KEYS.values():
+            entry[short] += u.get(short, 0)
+    tokens = {short: sum(u.get(short, 0) for u in usages) for short in USAGE_KEYS.values()} if usages else None
+    last = records[-1].get('at') if records else None
+    return {'duration_s': _seconds(started.get('at'), (closed or {}).get('at') or last),
+            'open': closed is None,
+            'caller_turns': sum(r.get('kind') == 'caller' for r in records),
+            'replies': len(turns),
+            'first_word_avg_ms': round(sum(firsts) / len(firsts)) if firsts else None,
+            'first_word_max_ms': max(firsts) if firsts else None,
+            'turn_avg_ms': round(sum(totals) / len(totals)) if totals else None,
+            'first_words_ms': firsts,
+            'tool_calls': len(tools),
+            'tools': sorted({r.get('name') for r in tools}),
+            'interruptions': sum(r.get('kind') == 'interrupted' for r in records),
+            'errors': sum(r.get('kind') == 'error' for r in records),
+            'ticket': ticket, 'requests': len(usages), 'tokens': tokens, 'by_model': by_model}
+
+
 def find(text):
     text = str(text).strip()
     return [p for p in _calls() if (lambda s: text in (s['reference'], s['caller']))(summary(p))]
@@ -147,8 +206,9 @@ def find(text):
 
 def _print_file(path):
     for line in path.read_text(encoding='utf-8').splitlines():
-        if line.strip():
-            print(format_event(json.loads(line)))
+        text = format_event(json.loads(line)) if line.strip() else None
+        if text:
+            print(text)
 
 
 def read_new(path, position):
@@ -180,7 +240,9 @@ def follow():
         if current:
             records, position = read_new(current, position)
             for record in records:
-                print(format_event(record), flush=True)
+                line = format_event(record)
+                if line:
+                    print(line, flush=True)
         time.sleep(0.4)
 
 

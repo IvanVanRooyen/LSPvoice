@@ -1,4 +1,5 @@
-"""Local admin dashboard for the voice agent: calls, reports, reviews, tests, settings, knowledge.
+"""Local admin dashboard for the voice agent: live call, calls, reports, reviews, tests, flows,
+knowledge, documentation and settings.
 
     python dashboard.py            opens http://127.0.0.1:8102 in your browser
 
@@ -21,7 +22,7 @@ from urllib.request import urlopen
 import webbrowser
 
 from fastapi import FastAPI, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 
 import configure
 import flows as flow_engine
@@ -59,10 +60,16 @@ def check_token(token):
 CSS = """
 :root{--ink:#14213d;--muted:#5b6475;--line:#d9dee7;--soft:#f3f5f9;--teal:#0f8b8d;--teal-soft:#e3f3f3;--navy:#1f3a68;
 --amber:#b26b00;--amber-soft:#fbf0dc;--red:#b23a3a;--red-soft:#fbe9e9;--green:#2e7d4f;--green-soft:#e4f2e9;--violet:#5b4b9a;--violet-soft:#ece9f6}
-*{box-sizing:border-box}body{margin:0;font-family:"Segoe UI",Arial,sans-serif;color:var(--ink);background:#fafbfd;font-size:14px}
-header{background:var(--navy);color:#fff;padding:10px 24px;display:flex;align-items:center;gap:28px;position:sticky;top:0;z-index:5}
-header b{font-size:16px;letter-spacing:.02em}nav a{color:#c9d6ee;text-decoration:none;margin-right:18px;font-weight:600}
-nav a.on,nav a:hover{color:#fff}main{padding:22px 28px;max-width:1280px}
+*{box-sizing:border-box}body{margin:0;font-family:"Segoe UI",Arial,sans-serif;color:var(--ink);background:#f6f8fb;font-size:14px;display:flex;min-height:100vh}
+aside{width:212px;flex:none;background:var(--navy);color:#fff;padding:16px 0;position:sticky;top:0;height:100vh;overflow-y:auto}
+aside .brand{padding:0 18px 14px;font-size:15px;font-weight:700;letter-spacing:.02em;border-bottom:1px solid #ffffff22}
+aside .brand span{display:block;font-size:11px;font-weight:400;color:#c9d6ee;margin-top:2px}
+aside .group{font-size:10.5px;text-transform:uppercase;letter-spacing:.08em;color:#8fa3c7;padding:16px 18px 4px}
+aside a{display:flex;align-items:center;gap:8px;color:#dbe4f4;text-decoration:none;padding:7px 18px;font-weight:600;border-left:3px solid transparent}
+aside a:hover{background:#ffffff12;color:#fff}aside a.on{background:#ffffff1c;color:#fff;border-left-color:#5fd0d2}
+aside .dot{width:8px;height:8px;border-radius:50%;background:#e5484d;box-shadow:0 0 0 3px #e5484d44;animation:pulse 1.4s infinite}
+@keyframes pulse{50%{opacity:.35}}
+main{padding:24px 32px;max-width:1240px;width:100%}
 h1{font-size:22px;margin:0 0 4px}h2{font-size:16px;margin:22px 0 8px}.muted{color:var(--muted)}
 .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px;margin:14px 0}
 .card{background:#fff;border:1px solid var(--line);border-radius:8px;padding:12px 14px}
@@ -87,16 +94,41 @@ button.secondary{background:var(--navy)}input,select{padding:6px 8px;border:1px 
 details{background:#fff;border:1px solid var(--line);border-radius:8px;padding:8px 12px;margin:8px 0}summary{cursor:pointer;font-weight:600}
 .flow{display:flex;flex-direction:column;align-items:center;gap:0;max-width:560px}.fstep{width:100%;border-radius:10px;padding:10px 14px;border:1px solid var(--line);background:#fff}.fstep.collect{border-left:5px solid var(--teal)}.fstep.confirm{border-left:5px solid var(--amber);background:var(--amber-soft)}.fstep.action{border-left:5px solid var(--violet);background:var(--violet-soft)}.fstep.end{text-align:center;background:var(--soft)}.arrow{color:var(--muted);font-size:18px;line-height:22px}.kind{font-size:11px;font-weight:700;text-transform:uppercase;color:var(--muted)}
 .notice{background:var(--amber-soft);border:1px solid #efd7a6;border-radius:8px;padding:8px 12px;margin:10px 0}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:14px 0}
+.stat{background:#fff;border:1px solid var(--line);border-radius:8px;padding:10px 12px}
+.stat .v{font-size:20px;font-weight:700}.stat .l{color:var(--muted);font-size:12px}.stat .s{color:var(--muted);font-size:11.5px;margin-top:2px}
+.meta{align-self:flex-end;font-size:11.5px;color:var(--muted);margin:-4px 4px 4px 0}
+.meta .slow{color:var(--amber);font-weight:700}
+.toolcard{align-self:center;max-width:90%;font-size:12.5px;background:var(--violet-soft);color:var(--violet);border-radius:10px;padding:4px 10px}
+.toolcard details{background:none;border:0;padding:0;margin:0}.toolcard summary{font-weight:600}
+.toolcard pre{margin:6px 0 2px;color:var(--ink);max-height:260px;overflow:auto}
+.bars{display:flex;align-items:flex-end;gap:4px;height:70px;padding:6px 0;border-bottom:1px solid var(--line)}
+.bars div{flex:1;max-width:28px;background:var(--teal);border-radius:3px 3px 0 0;min-height:2px}.bars div.slow{background:var(--amber)}
+.toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:6px 0 4px}
+.btn.ghost,button.ghost{background:#fff;color:var(--navy);border:1px solid var(--line)}
+.doclist{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px}
+.doclist a.doc{display:block;background:#fff;border:1px solid var(--line);border-radius:8px;padding:12px 14px;text-decoration:none;color:var(--ink)}
+.doclist a.doc:hover{border-color:var(--teal);box-shadow:0 1px 4px #0001}.doclist .t{font-weight:700}.doclist .d{color:var(--muted);font-size:12.5px;margin-top:4px}
+.prose{background:#fff;border:1px solid var(--line);border-radius:8px;padding:8px 26px 18px;line-height:1.55;max-width:960px}
+.prose table{margin:10px 0}.prose code{background:var(--soft);padding:0 4px;border-radius:4px}
+iframe.viewer{width:100%;height:calc(100vh - 150px);border:1px solid var(--line);border-radius:8px;background:#fff}
+.live-head{display:flex;align-items:center;gap:12px}.empty{padding:28px;text-align:center;color:var(--muted);background:#fff;border:1px dashed var(--line);border-radius:8px}
 """
 
-NAV = [('/', 'Overview'), ('/calls', 'Calls'), ('/reports', 'Reports'), ('/reviews', 'Reviews'),
-       ('/tests', 'Tests'), ('/flows', 'Flows'), ('/settings', 'Settings'), ('/knowledge', 'Knowledge')]
+NAV = [('Monitor', [('/', 'Overview'), ('/live', 'Live call'), ('/calls', 'Calls'), ('/reports', 'Reports'), ('/reviews', 'Reviews')]),
+       ('Improve', [('/tests', 'Tests'), ('/flows', 'Flows'), ('/knowledge', 'Knowledge')]),
+       ('Reference', [('/docs', 'Documentation')]),
+       ('Configure', [('/settings', 'Settings')])]
 
 
 def page(title, body, active='/'):
-    nav = ''.join(f'<a href="{href}" class="{"on" if href == active else ""}">{name}</a>' for href, name in NAV)
+    dot = ' <span class="dot" title="Call in progress"></span>' if active_call() is not None else ''
+    nav = ''.join(f'<div class="group">{group}</div>' + ''.join(
+        f'<a href="{href}" class="{"on" if href == active else ""}">{name}{dot if href == "/live" else ""}</a>'
+        for href, name in items) for group, items in NAV)
     return HTMLResponse(f'<!doctype html><html lang="en-AU"><head><meta charset="utf-8"><title>{escape(title)} · LSPcare voice agent</title>'
-                        f'<style>{CSS}</style></head><body><header><b>LSPcare voice agent</b><nav>{nav}</nav></header>'
+                        f'<meta name="viewport" content="width=device-width,initial-scale=1"><style>{CSS}</style></head><body>'
+                        f'<aside><div class="brand">LSPcare voice agent<span>Staff pilot console</span></div>{nav}</aside>'
                         f'<main>{body}</main></body></html>')
 
 
@@ -113,36 +145,78 @@ def when(iso):
 
 
 def markdown(text):
-    """Small renderer for our own reports: headings, bullets, code blocks, bold, inline code."""
-    out, in_code, in_list = [], False, False
+    """Small renderer for our own documents: headings, lists, tables, code, bold, italics, links.
+
+    Everything is escaped first; only http(s), relative and #anchor links are turned into links.
+    """
+    out, in_code, lst, table, para = [], False, None, [], []
 
     def inline(s):
-        s = escape(s)
+        s = escape(s, quote=False)
+        s = re.sub(r'`([^`]+)`', r'<code>\1</code>', s)
         s = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', s)
-        return re.sub(r'`([^`]+)`', r'<code>\1</code>', s)
+        s = re.sub(r'(?<![\w*])\*([^*\s][^*]*?)\*(?![\w*])', r'<i>\1</i>', s)
+
+        def link(m):
+            href = m.group(2)
+            if not re.match(r'(https?://|#|[\w./-]+$)', href) or href.startswith('//'):
+                return m.group(1)
+            if re.fullmatch(r'[\w.-]+\.(md|csv|pdf|html)', href):
+                href = f'/docs/view/{href}'
+            return f'<a href="{escape(href)}">{m.group(1)}</a>'
+        return re.sub(r'\[([^\]]+)\]\(([^)\s]+)\)', link, s)
+
+    def flush():
+        nonlocal lst, table, para
+        if para:
+            out.append(f'<p>{inline(" ".join(para))}</p>'); para = []
+        if lst:
+            out.append(f'</{lst}>'); lst = None
+        if table:
+            rows = [[c.strip() for c in r.strip().strip('|').split('|')] for r in table
+                    if not re.fullmatch(r'\|?[\s:|-]+\|?', r.strip())]
+            head, body = rows[0], rows[1:]
+            out.append('<table><tr>' + ''.join(f'<th>{inline(c)}</th>' for c in head) + '</tr>'
+                       + ''.join('<tr>' + ''.join(f'<td>{inline(c)}</td>' for c in r) + '</tr>' for r in body) + '</table>')
+            table = []
     for line in text.splitlines():
-        if line.startswith('```'):
-            if in_list:
-                out.append('</ul>'); in_list = False
+        if line.lstrip().startswith('```'):
+            flush()
             out.append('</pre>' if in_code else '<pre>'); in_code = not in_code
             continue
         if in_code:
             out.append(escape(line)); continue
-        if line.startswith('- '):
-            if not in_list:
-                out.append('<ul>'); in_list = True
-            out.append(f'<li>{inline(line[2:])}</li>'); continue
-        if in_list:
-            out.append('</ul>'); in_list = False
-        if line.startswith('#'):
-            level = min(len(line) - len(line.lstrip('#')) + 1, 4)
-            out.append(f'<h{level}>{inline(line.lstrip("#").strip())}</h{level}>')
-        elif line.startswith('|'):
-            out.append(f'<div class="muted">{inline(line)}</div>')
-        elif line.strip():
-            out.append(f'<p>{inline(line)}</p>')
-    if in_list:
-        out.append('</ul>')
+        stripped = line.strip()
+        bullet = re.match(r'\s*[-*] (.*)', line)
+        number = re.match(r'\s*\d+[.)] (.*)', line)
+        if stripped.startswith('|'):
+            if not table:
+                flush()
+            table.append(stripped); continue
+        if table:
+            flush()
+        if bullet or number:
+            kind = 'ul' if bullet else 'ol'
+            if para or lst != kind:
+                flush(); out.append(f'<{kind}>'); lst = kind
+            out.append(f'<li>{inline((bullet or number).group(1))}</li>'); continue
+        if lst and line.startswith('  ') and stripped:
+            out[-1] = out[-1][:-5] + ' ' + inline(stripped) + '</li>'; continue
+        if stripped.startswith('#'):
+            flush()
+            level = min(len(stripped) - len(stripped.lstrip('#')) + 1, 4)
+            out.append(f'<h{level}>{inline(stripped.lstrip("#").strip())}</h{level}>')
+        elif re.fullmatch(r'-{3,}|\*{3,}', stripped):
+            flush(); out.append('<hr>')
+        elif stripped:
+            if lst:
+                flush()
+            para.append(stripped)
+        else:
+            flush()
+    flush()
+    if in_code:
+        out.append('</pre>')
     return '\n'.join(out)
 
 
@@ -211,6 +285,136 @@ def safe_child(folder, name, pattern):
     return path
 
 
+def call_url(file):
+    """Page address for a saved call: the file name without .jsonl, so browsers treat it as a page."""
+    return '/calls/' + escape(Path(file).stem)
+
+
+def call_path(name):
+    """Saved call file for a page address; the old .jsonl form still works."""
+    stem = name[:-6] if name.endswith('.jsonl') else name
+    return safe_child(transcripts.FOLDER, stem + '.jsonl', r'[\w-]+\.jsonl')
+
+
+LIVE_SECONDS = 16 * 60  # a call lasts at most 15 minutes (app.CALL_SECONDS)
+
+
+def active_call():
+    """The newest call file if that call has not ended yet, else None."""
+    files = transcripts._calls()
+    if not files:
+        return None
+    path = files[-1]
+    try:
+        if datetime.now().timestamp() - path.stat().st_mtime > LIVE_SECONDS:
+            return None
+        with path.open('rb') as handle:
+            handle.seek(max(0, path.stat().st_size - 4096))
+            tail = handle.read().decode('utf-8', errors='replace')
+    except OSError:
+        return None
+    return None if '"kind": "closed"' in tail else path
+
+
+def usd(model_usage):
+    """US$ at list prices (harness.PRICES) for a {model: token counts} map."""
+    total = 0.0
+    for model, u in (model_usage or {}).items():
+        price = next((p for name, p in harness.PRICES.items() if str(model).startswith(name)), harness.PRICES['claude-opus-5-5'])
+        total += (u.get('input', 0) * price[0] + u.get('output', 0) * price[1]
+                  + u.get('cache_read', 0) * price[2] + u.get('cache_write', 0) * price[3]) / 1e6
+    return total
+
+
+def seconds_text(ms):
+    return '–' if ms is None else f'{ms / 1000:.1f} s'
+
+
+def duration_text(s):
+    return '–' if s is None else f'{s // 60}:{s % 60:02d}'
+
+
+def thousands(n):
+    return f'{n / 1000:.1f}k' if n >= 1000 else str(n)
+
+
+SLOW_MS = 2500  # first word later than this is marked slow
+
+
+def transcript_html(records):
+    """Readable conversation: speech bubbles, tool cards with details, and per-reply timing and tokens."""
+    parts, pending = [], []
+    for r in records:
+        kind = r.get('kind')
+        if kind in ('greeting', 'agent'):
+            parts.append(f'<div class="b agent"><small>Agent{" · greeting" if kind == "greeting" else ""} · {when(r.get("at"))[11:]}</small>{e(r["text"])}</div>')
+        elif kind == 'caller':
+            parts.append(f'<div class="b caller"><small>Caller · {when(r.get("at"))[11:]}</small>{e(r["text"])}</div>')
+        elif kind == 'tool' and r.get('name') == 'report_problem':
+            parts.append(f'<div class="report">⚑ Problem reported: {e(r.get("args", {}).get("description"))}</div>')
+        elif kind == 'tool':
+            detail = json.dumps({'input': r.get('args', {}), 'result': r.get('result')}, indent=2, ensure_ascii=False, default=str)
+            parts.append(f'<div class="toolcard"><details><summary>⚙ {e(transcripts._tool_summary(r["name"], r.get("args", {}), r.get("result")))}</summary>'
+                         f'<pre>{e(detail)}</pre></details></div>')
+        elif kind == 'usage':
+            pending.append(r)
+        elif kind == 'turn':
+            first = r.get('first_word_ms')
+            bits = [f'<span class="{"slow" if first and first > SLOW_MS else ""}">first word {seconds_text(first)}</span>',
+                    f'reply {seconds_text(r.get("total_ms"))}']
+            if pending:
+                by_model = {}
+                for u in pending:
+                    m = by_model.setdefault(u.get('model'), {})
+                    for k in transcripts.USAGE_KEYS.values():
+                        m[k] = m.get(k, 0) + u.get(k, 0)
+                fresh = sum(u.get('input', 0) + u.get('cache_write', 0) for u in pending)
+                cached = sum(u.get('cache_read', 0) for u in pending)
+                out = sum(u.get('output', 0) for u in pending)
+                bits.append(f'{len(pending)} request{"s" if len(pending) != 1 else ""} · {thousands(fresh + cached)} tokens in '
+                            f'({thousands(cached)} cached) · {thousands(out)} out · US${usd(by_model):.4f}')
+                pending = []
+            parts.append(f'<div class="meta">⏱ {" · ".join(bits)}</div>')
+        elif kind == 'interrupted':
+            parts.append(f'<div class="sys">↯ caller interrupted · they had heard: "{e(r.get("heard"))}"</div>')
+        elif kind == 'finish':
+            parts.append(f'<div class="sys">Agent ended the call: {e(r.get("reason"))}</div>')
+        elif kind == 'suppressed':
+            parts.append(f'<div class="sys">Not spoken (a question was already asked): "{e(r.get("text"))}"</div>')
+        elif kind == 'error':
+            parts.append(f'<div class="report">Error: {e(r.get("text"))}</div>')
+        elif kind == 'closed':
+            parts.append(f'<div class="sys">— call ended ({e(r.get("reason") or "caller hung up")}) —</div>')
+    return ''.join(parts)
+
+
+def stats_html(info):
+    s = transcripts.stats(info['records'])
+    cost = usd(s['by_model']) if s['tokens'] else None
+    t = s['tokens']
+    ticket = (f"#{e(s['ticket']['number'])}{' (dry run)' if s['ticket']['dry_run'] else ''}" if s['ticket'] else 'none')
+    cards = [
+        (duration_text(s['duration_s']), 'Duration' + (' so far' if s['open'] else ''), f"{s['caller_turns']} caller turns · {s['replies']} replies"),
+        (seconds_text(s['first_word_avg_ms']), 'Avg time to first word', f"slowest {seconds_text(s['first_word_max_ms'])}"),
+        (seconds_text(s['turn_avg_ms']), 'Avg full reply', f"{s['interruptions']} interruption{'s' if s['interruptions'] != 1 else ''}"),
+        (str(s['tool_calls']), 'Tool calls', ', '.join(s['tools']) or 'none'),
+        (ticket, 'Ticket', ''),
+        (thousands(t['input'] + t['cache_read'] + t['cache_write']) if t else '–', 'Tokens in',
+         f"{thousands(t['cache_read'])} from cache · {s['requests']} requests" if t else 'not recorded for this call'),
+        (thousands(t['output']) if t else '–', 'Tokens out', ''),
+        (f'US${cost:.3f}' if cost is not None else '–', 'Model cost', 'list price, AI only (not Twilio/voice)' if t else 'recorded from this version on'),
+    ]
+    tiles = ''.join(f'<div class="stat"><div class="v">{v}</div><div class="l">{e(l)}</div><div class="s">{e(sub)}</div></div>' for v, l, sub in cards)
+    bars = ''
+    if s['first_words_ms']:
+        top = max(max(s['first_words_ms']), SLOW_MS)
+        bars = ('<div class="card" style="margin-bottom:14px"><b>Time to first word, per reply</b> <span class="muted">(amber = slower than '
+                f'{SLOW_MS / 1000:.1f} s)</span><div class="bars">'
+                + ''.join(f'<div class="{"slow" if ms > SLOW_MS else ""}" style="height:{max(3, round(ms / top * 100))}%" title="reply {i}: {ms} ms"></div>'
+                          for i, ms in enumerate(s['first_words_ms'], 1)) + '</div></div>')
+    return f'<div class="stats">{tiles}</div>{bars}'
+
+
 # ------------------------------------------------------------------ background jobs (tests, reviews)
 
 async def run_job(job_id, command):
@@ -260,7 +464,8 @@ async def overview():
     model = (f'{e(options["model"])} · effort {e(options["output_config"]["effort"])} · thinking '
              f'{e(options.get("thinking", {}).get("type", "adaptive"))}' if options else e(cfg.get('model')))
     last = runs[0] if runs else None
-    body = f"""<h1>Overview</h1><p class="muted">Pilot {pilot}</p>
+    live = ('<div class="notice">● A call is in progress. <a href="/live"><b>Watch it live</b></a></div>' if active_call() else '')
+    body = f"""<h1>Overview</h1><p class="muted">Pilot {pilot}</p>{live}
     <div class="cards">
       <div class="card"><div class="big">{sum(1 for r in rows if r['at'].startswith(today))}</div><div class="lbl">calls today · {len(rows)} saved</div></div>
       <div class="card"><div class="big" style="color:var(--red)">{len(reports)}</div><div class="lbl">problems reported by voice</div></div>
@@ -281,10 +486,18 @@ async def overview():
 def calls_table(rows):
     if not rows:
         return '<p class="muted">No saved calls yet. Calls are saved while <code>transcripts</code> is on.</p>'
-    body = ''.join(f"""<tr><td><a href="/calls/{e(r['file'])}">{when(r['at'])}</a></td><td>{e(r['reference'] or '–')}</td>
-        <td>…{e(r['caller'] or '???')}</td><td>{r['turns']}</td><td>{e(r['ended'] or '–')}</td><td>{call_status(r)}</td>
-        <td class="muted">{e((r['version'] or {}).get('code', ''))}</td></tr>""" for r in rows)
-    return f'<table><tr><th>When</th><th>Reference</th><th>Caller</th><th>Turns</th><th>Ended</th><th>Status</th><th>Version</th></tr>{body}</table>'
+    lines, live = [], active_call()
+    for r in rows:
+        s = transcripts.stats(r['records'])
+        slow = s['first_word_avg_ms'] and s['first_word_avg_ms'] > SLOW_MS
+        ticket = f"#{e(s['ticket']['number'])}" if s['ticket'] else '<span class="muted">–</span>'
+        lines.append(f"""<tr style="cursor:pointer" onclick="location.href='{call_url(r['file'])}'"><td><a href="{call_url(r['file'])}">{when(r['at'])}</a></td>
+        <td><b>{e(r['reference'] or '–')}</b></td><td>…{e(r['caller'] or '???')}</td><td>{duration_text(s['duration_s'])}</td><td>{r['turns']}</td>
+        <td class="{'warn' if slow else ''}">{seconds_text(s['first_word_avg_ms'])}</td><td>{ticket}</td>
+        <td>{'<span class="pill bad">● live</span>' if live and live.name == r['file'] else e(r['ended'] or 'hung up')}</td><td>{call_status(r)}</td>
+        <td class="muted">{e((r['version'] or {}).get('code', ''))}</td></tr>""")
+    return ('<table><tr><th>When</th><th>Ref</th><th>Caller</th><th>Length</th><th>Turns</th><th>Avg first word</th><th>Ticket</th>'
+            f'<th>Ended</th><th>Status</th><th>Version</th></tr>{"".join(lines)}</table>')
 
 
 @app.get('/calls')
@@ -303,52 +516,52 @@ async def calls_page(q: str = '', show: str = 'all'):
     return page('Calls', body, '/calls')
 
 
+@app.get('/calls/{name}/raw')
+async def call_raw(name: str):
+    path = call_path(name)
+    return PlainTextResponse(path.read_text(encoding='utf-8'), media_type='text/plain; charset=utf-8')
+
+
 @app.get('/calls/{name}')
 async def call_detail(name: str, made: str = ''):
-    path = safe_child(transcripts.FOLDER, name, r'[\w.-]+\.jsonl')
+    path = call_path(name)
+    if name.endswith('.jsonl'):
+        return RedirectResponse(call_url(path.name) + (f'?made={made}' if made else ''), status_code=307)
     info = transcripts.summary(path)
     reviewed = review._load_state().get(path.name)
     v = info['version'] or {}
-    parts = []
-    for r in info['records']:
-        kind = r.get('kind')
-        if kind in ('greeting', 'agent'):
-            parts.append(f'<div class="b agent"><small>Agent{" · greeting" if kind == "greeting" else ""}</small>{e(r["text"])}</div>')
-        elif kind == 'caller':
-            parts.append(f'<div class="b caller"><small>Caller · {when(r.get("at"))[11:]}</small>{e(r["text"])}</div>')
-        elif kind == 'tool' and r.get('name') == 'report_problem':
-            parts.append(f'<div class="report">⚑ Problem reported: {e(r.get("args", {}).get("description"))}</div>')
-        elif kind == 'tool':
-            parts.append(f'<div class="tool">⚙ {e(transcripts._tool_summary(r["name"], r.get("args", {}), r.get("result")))}</div>')
-        elif kind == 'interrupted':
-            parts.append(f'<div class="sys">↯ caller interrupted · heard: "{e(r.get("heard"))}"</div>')
-        elif kind == 'turn':
-            parts.append(f'<div class="sys">first word {e(r.get("first_word_ms"))} ms · turn {e(r.get("total_ms"))} ms</div>')
-        elif kind == 'finish':
-            parts.append(f'<div class="sys">call ended by agent: {e(r.get("reason"))}</div>')
-        elif kind == 'suppressed':
-            parts.append(f'<div class="sys">muted (question already asked): "{e(r.get("text"))}"</div>')
-        elif kind == 'error':
-            parts.append(f'<div class="report">Error: {e(r.get("text"))}</div>')
+    files = [p.name for p in transcripts._calls()]
+    index = files.index(path.name)
+    newer = files[index + 1] if index + 1 < len(files) else None
+    older = files[index - 1] if index > 0 else None
     review_html = ('<p class="muted">Not reviewed yet.</p>' if reviewed is None else
                    '<p><span class="pill ok">✓ No issues found</span></p>' if not reviewed['issues'] else
                    '<ul>' + ''.join(f'<li>{e(i)}</li>' for i in reviewed['issues']) + '</ul>')
     made_html = f'<div class="notice">Added scenario <b>{e(made)}</b> to scenarios.json (tagged draft). Edit its expectations, then run it from Tests.</div>' if made else ''
-    body = f"""<p><a href="/calls">← Calls</a></p><h1>Call {e(info['reference'] or info['file'])}</h1>
-    <p class="muted">{when(info['at'])} · caller …{e(info['caller'] or '???')} · {info['turns']} caller turns · ended {e(info['ended'])} · {call_status({**info, 'review': reviewed})}</p>
-    {f'<p class="muted">Version {e(v.get("code"))} · {e(v.get("model"))} · effort {e(v.get("effort"))} · thinking {e(v.get("thinking"))} · prompt {e(v.get("prompt"))} · knowledge {e(v.get("knowledge"))}</p>' if v else '<p class="muted">Recorded before version stamps were added.</p>'}
-    {made_html}<div class="grid2"><div class="card"><b>Automatic review</b>{review_html}
-      <form class="inline" method="post" action="/calls/{e(info['file'])}/review">{token_field()}<button class="secondary">{'Review again' if reviewed else 'Review this call'} (≈1¢)</button></form></div>
-    <div class="card"><b>Turn into a test</b><p class="muted">Adds a draft scenario that replays the caller's lines{', with the reported problem as a judge criterion' if info['reports'] else ''}.</p>
-      {f'<form class="inline" method="post" action="/calls/{e(info["file"])}/scenario">{token_field()}<button>Make test scenario</button></form>' if (info['reference'] or info['caller']) else '<p class="muted">This call was recorded before call references, so it cannot be converted automatically.</p>'}</div></div>
-    <h2>Transcript</h2><div class="chat">{''.join(parts)}</div>"""
-    return page('Call', body, '/calls')
+    url = call_url(path.name)
+    live = active_call() == path
+    version = (f'{e(v.get("code"))} · {e(v.get("model"))} · effort {e(v.get("effort"))} · thinking {e(v.get("thinking"))} · '
+               f'prompt {e(v.get("prompt"))} · knowledge {e(v.get("knowledge"))}' if v else 'recorded before version stamps were added')
+    body = f"""<div class="toolbar"><a href="/calls">← All calls</a><span style="flex:1"></span>
+      {f'<a class="btn ghost" href="{call_url(newer)}">← Newer</a>' if newer else ''}{f'<a class="btn ghost" href="{call_url(older)}">Older →</a>' if older else ''}
+      <a class="btn ghost" href="{url}/raw" title="The saved event log, for debugging">Raw data</a></div>
+    <h1>Call {e(info['reference'] or info['file'])} {'<a class="pill bad" href="/live">● live now</a>' if live else ''}</h1>
+    <p class="muted">{when(info['at'])} · caller …{e(info['caller'] or '???')} · ended: {e(info['ended'] or ('in progress' if live else 'caller hung up'))} · {call_status({**info, 'review': reviewed})}</p>
+    {made_html}{stats_html(info)}
+    <div class="grid2" style="grid-template-columns:minmax(0,1fr) 320px;align-items:start">
+    <div><h2 style="margin-top:0">Conversation</h2><div class="chat">{transcript_html(info['records'])}</div></div>
+    <div><div class="card"><b>Automatic review</b>{review_html}
+      <form class="inline" method="post" action="{url}/review">{token_field()}<button class="secondary">{'Review again' if reviewed else 'Review this call'} (≈1¢)</button></form></div>
+    <div class="card" style="margin-top:12px"><b>Turn into a test</b><p class="muted">Adds a draft scenario that replays the caller's lines{', with the reported problem as a judge criterion' if info['reports'] else ''}.</p>
+      {f'<form class="inline" method="post" action="{url}/scenario">{token_field()}<button>Make test scenario</button></form>' if (info['reference'] or info['caller']) else '<p class="muted">This call was recorded before call references, so it cannot be converted automatically.</p>'}</div>
+    <div class="card" style="margin-top:12px"><b>Agent version</b><p class="muted" style="margin-bottom:0">{version}</p></div></div></div>"""
+    return page(f'Call {info["reference"] or ""}', body, '/calls')
 
 
 @app.post('/calls/{name}/scenario')
 async def call_to_scenario(name: str, token: str = Form('')):
     check_token(token)
-    path = safe_child(transcripts.FOLDER, name, r'[\w.-]+\.jsonl')
+    path = call_path(name)
     info = transcripts.summary(path)
     key = info['reference'] or info['caller']
     if not key:
@@ -358,13 +571,13 @@ async def call_to_scenario(name: str, token: str = Form('')):
         harness.add_scenario(scenario)
     except SystemExit as stop:
         raise HTTPException(409, str(stop))
-    return RedirectResponse(f'/calls/{name}?made={scenario["id"]}', status_code=303)
+    return RedirectResponse(f'{call_url(path.name)}?made={scenario["id"]}', status_code=303)
 
 
 @app.post('/calls/{name}/review')
 async def call_review(name: str, token: str = Form('')):
     check_token(token)
-    path = safe_child(transcripts.FOLDER, name, r'[\w.-]+\.jsonl')
+    path = call_path(name)
     info = transcripts.summary(path)
     key = info['reference'] or info['caller']
     command = [sys.executable, 'review.py', '--budget', '0.05'] + (['--again', key] if key else [])
@@ -379,7 +592,7 @@ async def reports_page():
         m = re.search(r'-ref(\d{4})-', path.name)
         if m:
             files[m.group(1)] = path.name
-    rows = ''.join(f"""<tr><td>{when(r['at'])}</td><td>{f'<a href="/calls/{e(files[r["reference"]])}">{e(r["reference"])}</a>' if r['reference'] in files else e(r['reference'])}</td>
+    rows = ''.join(f"""<tr><td>{when(r['at'])}</td><td>{f'<a href="{call_url(files[r["reference"]])}">{e(r["reference"])}</a>' if r['reference'] in files else e(r['reference'])}</td>
         <td>…{e(r['caller'] or '???')}</td><td>{e(r['description'])}</td></tr>""" for r in reports)
     body = ('<h1>Problem reports</h1><p class="muted">Reported by testers during calls ("I want to report a problem"). '
             'Reports posted in Teams are not shown here: match them by reference on the Calls page.</p>'
@@ -618,6 +831,243 @@ async def knowledge_page():
     search = searched when needed. To change a document: edit it, update its registry entry (version, fingerprint, review), run the tests, restart.</p>
     <table><tr><th>Source</th><th>Version</th><th>Delivery</th><th>Readiness</th><th>Fingerprint</th><th>Bytes</th><th>Use when</th></tr>{''.join(rows)}</table>"""
     return page('Knowledge', body, '/knowledge')
+
+
+@app.get('/live')
+async def live_page():
+    body = """<div class="live-head"><h1>Live call</h1><span id="badge"></span></div>
+    <p class="muted">Follows the call in progress as it happens (transcripts must be on). The page updates by itself; leave it open while you test.</p>
+    <div id="live"><div class="empty">Loading…</div></div>
+    <script>
+    let sig = '', stick = true;
+    window.addEventListener('scroll', () => { stick = window.innerHeight + window.scrollY >= document.body.scrollHeight - 80; });
+    async function poll() {
+      try {
+        const r = await fetch('/live/feed?since=' + encodeURIComponent(sig));
+        const j = await r.json();
+        if (!j.same) {
+          sig = j.sig;
+          document.getElementById('live').innerHTML = j.html;
+          document.getElementById('badge').innerHTML = j.active ? '<span class="pill bad">● in progress</span>' : '<span class="pill grey">no call in progress</span>';
+          if (j.active && stick) window.scrollTo(0, document.body.scrollHeight);
+        }
+      } catch (err) { document.getElementById('badge').innerHTML = '<span class="pill warn">dashboard not reachable</span>'; }
+      setTimeout(poll, 1000);
+    }
+    poll();
+    </script>"""
+    return page('Live call', body, '/live')
+
+
+@app.get('/live/feed')
+async def live_feed(since: str = ''):
+    path = active_call()
+    files = transcripts._calls()
+    latest = path or (files[-1] if files else None)
+    sig = f'{latest.name}:{latest.stat().st_size}:{bool(path)}' if latest else 'none'
+    if since == sig:
+        return JSONResponse({'same': True})
+    if path is None:
+        last = ''
+        if latest:
+            info = transcripts.summary(latest)
+            last = (f'<p>Last call: <a href="{call_url(latest.name)}">{when(info["at"])} · ref {e(info["reference"] or "–")}</a> '
+                    f'<span class="muted">({info["turns"]} caller turns, ended {e(info["ended"] or "by hang-up")})</span></p>')
+        cfg = read_config()
+        off = '' if cfg.get('transcripts') == 'on' else '<p><span class="pill warn">Transcripts are off</span> turn them on in Settings to see calls here.</p>'
+        html = f'<div class="empty">No call in progress. This page switches to the call as soon as one starts.</div>{off}{last}'
+        return JSONResponse({'sig': sig, 'active': False, 'html': html})
+    info = transcripts.summary(path)
+    html = (f'<p class="muted">Ref <b>{e(info["reference"] or "–")}</b> · caller …{e(info["caller"] or "???")} · started {when(info["at"])[11:]} · '
+            f'<a href="{call_url(path.name)}">open call page</a></p>{stats_html(info)}'
+            f'<div class="chat">{transcript_html(info["records"])}</div>')
+    return JSONResponse({'sig': sig, 'active': True, 'html': html})
+
+
+# ------------------------------------------------------------------ documentation
+
+REPO = HERE.parent
+DOC_GROUPS = [
+    ('Training and testing', ['staff-testing.md', 'testing.md']),
+    ('How it works', ['technical-reference.pdf', 'flows.md', 'knowledge.md', 'voice-agent.md', 'knowledge-library.md', 'mock-backend.md']),
+    ('Rules, decisions and plans', ['business-rules.md', 'issue-register.csv', 'deployment-plan.md', 'overview.md']),
+]
+EXPECT_TEXT = {'tools_called': 'Must use', 'tools_not_called': 'Must not use', 'said_any': 'Must say one of',
+               'said_none': 'Must never say', 'ticket_args': 'Ticket details must include'}
+
+
+def doc_index():
+    """Documents the dashboard may show: name -> path. Only these names are ever served."""
+    found = {}
+    folder = REPO / 'docs'
+    if folder.is_dir():
+        for path in sorted(folder.iterdir()):
+            if path.suffix in ('.md', '.csv', '.pdf', '.html') and path.is_file():
+                found[path.name] = path
+    for name, path in [('overview.md', REPO / 'README.md'), ('voice-agent.md', HERE / 'README.md'),
+                       ('knowledge-library.md', LIBRARY / 'README.md')]:
+        if path.is_file():
+            found[name] = path
+    return found
+
+
+def doc_info(name, path):
+    title, about = name.rsplit('.', 1)[0].replace('-', ' ').capitalize(), ''
+    if path.suffix == '.md':
+        lines = path.read_text(encoding='utf-8').splitlines()
+        heading = next((l for l in lines if l.startswith('# ')), None)
+        if heading:
+            title = heading[2:].strip()
+            rest = lines[lines.index(heading) + 1:]
+            para = []
+            for line in rest:
+                if line.strip() and not line.startswith(('#', '|', '-', '`')):
+                    para.append(line.strip())
+                elif para:
+                    break
+            about = ' '.join(para)
+    elif path.suffix == '.pdf':
+        title, about = 'Technical reference (PDF)' if 'technical' in name else title, 'Architecture, call handling and the AI conversation component.'
+    elif path.suffix == '.csv':
+        about = 'Spreadsheet register.'
+    about = re.sub(r'[`*]', '', about)
+    return title, (about[:150] + '…') if len(about) > 150 else about
+
+
+@app.get('/docs')
+async def docs_page():
+    docs = doc_index()
+    runs = harness_runs()
+    scenarios = json.loads(harness.SCENARIOS.read_text(encoding='utf-8'))['scenarios']
+    changed = lambda p: datetime.fromtimestamp(p.stat().st_mtime).strftime('%d %b %Y')
+
+    def card(href, title, about, foot):
+        return f'<a class="doc" href="{href}"><div class="t">{e(title)}</div><div class="d">{e(about)}</div><div class="d">{e(foot)}</div></a>'
+    last = runs[0] if runs else None
+    special = [card('/docs/scenarios', 'Training scenarios', f'All {len(scenarios)} test conversations: what the caller says, '
+                    'what the agent must and must not do, and the latest result for each.', 'from scenarios.json'),
+               card(f'/tests/{last["name"]}' if last else '/tests', 'Latest test results',
+                    f'{last["passed"]}/{last["total"]} passed · US${last["data"]["cost"]:.2f}' if last else 'No test runs yet.',
+                    f'run {last["data"]["settings"].get("started", "")}' if last else ''),
+               card('/flows', 'Flows (live diagram)', 'The ticket flow, drawn from the flow files the agent uses.', 'always current')]
+    used, sections = set(), []
+    for group, names in DOC_GROUPS:
+        cards = [card(f'/docs/view/{n}', *doc_info(n, docs[n]), f'changed {changed(docs[n])}') for n in names if n in docs]
+        used.update(names)
+        if group == 'Training and testing':
+            cards = special[:2] + cards
+        if group == 'How it works':
+            cards.append(special[2])
+        sections.append(f'<h2>{group}</h2><div class="doclist">{"".join(cards)}</div>')
+    other = [card(f'/docs/view/{n}', *doc_info(n, p), f'changed {changed(p)}') for n, p in docs.items()
+             if n not in used and not (n.endswith('.html') and n[:-5] + '.pdf' in docs)]
+    if other:
+        sections.append(f'<h2>Other</h2><div class="doclist">{"".join(other)}</div>')
+    runs_html = ''.join(f'<tr><td><a href="/tests/{e(r["name"])}">{e(r["data"]["settings"].get("started"))}</a></td>'
+                        f'<td><span class="pill {"ok" if r["passed"] == r["total"] else "warn"}">{r["passed"]}/{r["total"]}</span></td>'
+                        f'<td>US${r["data"]["cost"]:.3f}</td></tr>' for r in runs[:5])
+    body = (f'<h1>Documentation</h1><p class="muted">Guides, reference material and test evidence for the voice agent, from the '
+            f'<code>docs/</code> folder of the repository. Documents open here; PDFs open in the built-in viewer.</p>{"".join(sections)}'
+            + (f'<h2>Recent test runs</h2><table><tr><th>Run</th><th>Passed</th><th>Cost</th></tr>{runs_html}</table>' if runs else ''))
+    return page('Documentation', body, '/docs')
+
+
+@app.get('/docs/view/{name}')
+async def doc_view(name: str):
+    docs = doc_index()
+    if name not in docs:
+        raise HTTPException(404)
+    path = docs[name]
+    title, _ = doc_info(name, path)
+    actions = f'<a class="btn ghost" href="/docs/file/{e(name)}" target="_blank">Open in new tab</a>'
+    if path.suffix == '.md':
+        content = f'<div class="prose">{markdown(path.read_text(encoding="utf-8"))}</div>'
+    elif path.suffix == '.csv':
+        import csv
+        rows = list(csv.reader(path.read_text(encoding='utf-8').splitlines()))
+        content = ('<table>' + ''.join('<tr>' + ''.join(f'<{"th" if i == 0 else "td"}>{e(c)}</{"th" if i == 0 else "td"}>' for c in row) + '</tr>'
+                                       for i, row in enumerate(rows)) + '</table>'
+                   + ('<p class="muted">No entries yet.</p>' if len(rows) <= 1 else ''))
+    else:
+        if path.suffix == '.pdf' and (path.with_suffix('.html')).is_file():
+            actions += f' <a class="btn ghost" href="/docs/view/{e(path.with_suffix(".html").name)}">HTML version</a>'
+        content = f'<iframe class="viewer" src="/docs/file/{e(name)}" title="{e(title)}"></iframe>'
+    changed = datetime.fromtimestamp(path.stat().st_mtime).strftime('%d %b %Y %H:%M')
+    body = (f'<div class="toolbar"><a href="/docs">← Documentation</a><span style="flex:1"></span>{actions}</div>'
+            f'<h1>{e(title)}</h1><p class="muted">{e(path.relative_to(REPO).as_posix())} · last changed {changed}</p>{content}')
+    return page(title, body, '/docs')
+
+
+@app.get('/docs/file/{name}')
+async def doc_file(name: str):
+    docs = doc_index()
+    if name not in docs:
+        raise HTTPException(404)
+    path = docs[name]
+    types = {'.pdf': 'application/pdf', '.html': 'text/html; charset=utf-8', '.md': 'text/plain; charset=utf-8',
+             '.csv': 'text/plain; charset=utf-8'}
+    # Shown inline; an HTML document is sandboxed (no scripts, no same-origin access to the dashboard).
+    # (A sandbox header would stop the browser's PDF viewer, so it is only added for HTML.)
+    headers = {'X-Content-Type-Options': 'nosniff'}
+    if path.suffix == '.html':
+        headers['Content-Security-Policy'] = 'sandbox'
+    return FileResponse(path, media_type=types[path.suffix], content_disposition_type='inline', filename=path.name,
+                        headers=headers)
+
+
+def expect_lines(expect):
+    lines = []
+    for key, value in expect.items():
+        if key == 'finish':
+            lines.append('Must not end the call' if value == 'none' else f'Must end the call ({value})')
+        elif key == 'ticket':
+            lines.append('Must log a ticket' if value else 'Must not log a ticket')
+        elif isinstance(value, list):
+            lines.append(f'{EXPECT_TEXT.get(key, key)}: ' + ', '.join(f'“{v}”' if key.startswith('said') else str(v) for v in value))
+        elif isinstance(value, dict):
+            lines.append(f'{EXPECT_TEXT.get(key, key)}: ' + ', '.join(f'{k} = {v}' for k, v in value.items()))
+        else:
+            lines.append(f'{EXPECT_TEXT.get(key, key)}: {value}')
+    return lines
+
+
+@app.get('/docs/scenarios')
+async def scenarios_page(tag: str = '', q: str = ''):
+    data = json.loads(harness.SCENARIOS.read_text(encoding='utf-8'))
+    scenarios = data['scenarios']
+    tags = sorted({t for s in scenarios for t in s.get('tags', [])})
+    latest = {}
+    for run in harness_runs():  # newest first: keep each scenario's most recent result
+        for r in run['data']['results']:
+            latest.setdefault(r['id'], (r['passed'], run['name']))
+    shown = [s for s in scenarios if (not tag or tag in s.get('tags', []))
+             and (not q or q.lower() in json.dumps(s, ensure_ascii=False).lower())]
+    cards = []
+    for s in shown:
+        caller = s['caller']
+        if 'script' in caller:
+            said = '<ol>' + ''.join(f'<li>“{e(line)}”</li>' for line in caller['script']) + '</ol>'
+            kind = 'Scripted caller (says these lines in order)'
+        else:
+            said = f'<p>{e(caller.get("brief"))}</p>'
+            kind = f'Simulated caller (an AI plays this part, up to {e(caller.get("max_turns", "?"))} turns)'
+        result = latest.get(s['id'])
+        badge = ('<span class="pill grey">not run yet</span>' if result is None else
+                 f'<a class="pill {"ok" if result[0] else "bad"}" href="/tests/{e(result[1])}">{"passed" if result[0] else "failed"} last run</a>')
+        checks = ''.join(f'<li>{e(line)}</li>' for line in expect_lines(s.get('expect', {})))
+        judged = ''.join(f'<li>{e(c)}</li>' for c in s.get('judge', []))
+        cards.append(f"""<details class="card"><summary>{e(s['id'])} · {e(s['title'])} {badge}
+          <span class="muted" style="font-weight:400">{' '.join(f'<span class="pill grey">{e(t)}</span>' for t in s.get('tags', []))}</span></summary>
+          <div class="grid2" style="margin-top:8px"><div><b>{kind}</b>{said}</div>
+          <div>{f'<b>Hard checks</b><ul>{checks}</ul>' if checks else ''}{f'<b>Judged on</b><ul>{judged}</ul>' if judged else ''}</div></div></details>""")
+    options = ''.join(f'<option value="{e(t)}" {"selected" if t == tag else ""}>{e(t)}</option>' for t in tags)
+    body = f"""<div class="toolbar"><a href="/docs">← Documentation</a></div><h1>Training scenarios</h1>
+    <p class="muted">{e(data.get('about', ''))}</p>
+    <form method="get" class="toolbar"><input name="q" value="{e(q)}" placeholder="Search words, e.g. orange button">
+      <select name="tag"><option value="">All tags</option>{options}</select><button class="secondary">Filter</button>
+      <span class="muted">{len(shown)} of {len(scenarios)} scenarios · <a href="/tests">run them from Tests</a></span></form>
+    {''.join(cards) or '<div class="empty">No scenarios match.</div>'}"""
+    return page('Training scenarios', body, '/docs')
 
 
 def main():

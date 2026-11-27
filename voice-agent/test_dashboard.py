@@ -40,15 +40,82 @@ class DashboardTests(unittest.TestCase):
         self.client = TestClient(dashboard.app, base_url='http://127.0.0.1:8102')
         self.root = root
 
-    def make_call(self):
+    def make_call(self, open_call=False):
         with patch('sys.stderr', io.StringIO()):
             t = transcripts.CallTranscript('CA' + '8' * 32, True, details={'reference': '4721', 'caller': '019',
                                                                            'version': {'code': 'abc1234'}})
             t.event('greeting', {'text': 'Hi, this is LSPcare support.'})
             t.event('caller', {'text': "It's Sam, my screen is <b>black</b>"})
             t.event('tool', {'name': 'report_problem', 'args': {'description': 'It talked over me'}, 'result': {'recorded': True}})
-            t.event('closed', {'reason': 'goodbye', 'flagged': True})
+            if not open_call:
+                t.event('closed', {'reason': 'goodbye', 'flagged': True})
         return t.path
+
+    def call_with_usage(self):
+        usage = type('U', (), {'input_tokens': 1000, 'output_tokens': 100, 'cache_read_input_tokens': 9000,
+                               'cache_creation_input_tokens': 0})()
+        with patch('sys.stderr', io.StringIO()) as err:
+            t = transcripts.CallTranscript('CA' + '7' * 32, True, details={'reference': '5150'})
+            t.event('caller', {'text': 'My screen is black'})
+            t.event('usage', transcripts.usage_record('claude-sonnet-5-5', usage))
+            t.event('usage', transcripts.usage_record('claude-sonnet-5-5', usage))
+            t.event('tool', {'name': 'flow_confirm', 'args': {'answer': 'yes'},
+                             'result': {'confirmed': True, 'result': {'ticket_logged': True, 'ticket_number': '881', 'dry_run': True}}})
+            t.event('turn', {'first_word_ms': 3100, 'total_ms': 4200, 'tools': ['flow_confirm']})
+            t.event('closed', {'reason': 'goodbye', 'flagged': False})
+        self.assertNotIn('usage', err.getvalue())  # token lines are not printed in the pilot window
+        return t.path
+
+    def test_usage_is_recorded_and_costed(self):
+        path = self.call_with_usage()
+        s = transcripts.stats(transcripts.summary(path)['records'])
+        self.assertEqual(s['tokens'], {'input': 2000, 'output': 200, 'cache_read': 18000, 'cache_write': 0})
+        self.assertEqual(s['ticket'], {'number': '881', 'dry_run': True})
+        self.assertEqual(s['first_word_avg_ms'], 3100)
+        # 2000*2 + 200*10 + 18000*0.10 per million
+        self.assertAlmostEqual(dashboard.usd(s['by_model']), (4000 + 2000 + 1800) / 1e6)
+        page_text = self.client.get(dashboard.call_url(path.name)).text
+        self.assertIn('Tokens in', page_text); self.assertIn('#881 (dry run)', page_text)
+        self.assertIn('2 requests', page_text); self.assertIn('class="slow"', page_text)
+
+    def test_call_pages_use_plain_addresses(self):
+        path = self.make_call()
+        listing = self.client.get('/calls').text
+        self.assertIn(f'href="/calls/{path.stem}"', listing); self.assertNotIn('.jsonl"', listing)
+        old = self.client.get(f'/calls/{path.name}', follow_redirects=False)
+        self.assertEqual(old.status_code, 307); self.assertEqual(old.headers['location'], f'/calls/{path.stem}')
+        raw = self.client.get(f'/calls/{path.stem}/raw')
+        self.assertEqual(raw.status_code, 200); self.assertIn('"kind": "greeting"', raw.text)
+
+    def test_live_feed_follows_open_call(self):
+        self.assertFalse(self.client.get('/live/feed').json()['active'])
+        path = self.make_call(open_call=True)
+        feed = self.client.get('/live/feed').json()
+        self.assertTrue(feed['active']); self.assertIn('&lt;b&gt;black&lt;/b&gt;', feed['html'])
+        self.assertTrue(self.client.get('/live/feed', params={'since': feed['sig']}).json()['same'])
+        self.assertIn('class="dot"', self.client.get('/calls').text)
+        with path.open('a', encoding='utf-8') as handle:
+            handle.write(json.dumps({'at': '2026-11-27T10:00:00', 'kind': 'closed', 'reason': 'goodbye'}) + '\n')
+        self.assertFalse(self.client.get('/live/feed').json()['active'])
+
+    def test_docs_are_listed_and_only_known_files_served(self):
+        docs = Path(self.tmp.name) / 'repo' / 'docs'; docs.mkdir(parents=True)
+        (docs / 'guide.md').write_text('# Staff guide\n\nHow to test.\n\n| A | B |\n|---|---|\n| 1 | <x> |\n', encoding='utf-8')
+        (docs / 'ref.pdf').write_bytes(b'%PDF-1.4 synthetic')
+        (docs / 'page.html').write_text('<script>alert(1)</script>', encoding='utf-8')
+        with patch.object(dashboard, 'REPO', docs.parent):
+            index = self.client.get('/docs').text
+            self.assertIn('Staff guide', index); self.assertIn('Training scenarios', index)
+            view = self.client.get('/docs/view/guide.md').text
+            self.assertIn('<th>A</th>', view); self.assertIn('&lt;x&gt;', view)
+            pdf = self.client.get('/docs/file/ref.pdf')
+            self.assertEqual(pdf.headers['content-type'], 'application/pdf')
+            self.assertTrue(pdf.headers['content-disposition'].startswith('inline'))
+            self.assertEqual(self.client.get('/docs/file/page.html').headers['content-security-policy'], 'sandbox')
+            for url in ['/docs/view/..%2F..%2Ftwilio-pilot.json', '/docs/file/missing.pdf', '/docs/view/twilio-pilot.json']:
+                self.assertEqual(self.client.get(url).status_code, 404, url)
+        scenarios = self.client.get('/docs/scenarios?tag=core').text
+        self.assertIn('X-1', scenarios); self.assertIn('Scripted caller', scenarios)
 
     def test_only_local_host_names_are_served(self):
         self.assertEqual(TestClient(dashboard.app, base_url='http://evil.example').get('/').status_code, 403)
@@ -56,19 +123,20 @@ class DashboardTests(unittest.TestCase):
 
     def test_every_page_renders_and_never_shows_secrets(self):
         path = self.make_call()
-        for url in ['/', '/calls', '/calls?show=attention', f'/calls/{path.name}', '/reports', '/reviews', '/tests',
-                    '/flows', '/settings', '/knowledge']:
+        for url in ['/', '/calls', '/calls?show=attention', f'/calls/{path.stem}', '/reports', '/reviews', '/tests',
+                    '/flows', '/settings', '/knowledge', '/live', '/live/feed', '/docs', '/docs/scenarios',
+                    '/docs/view/testing.md', '/docs/view/issue-register.csv', '/docs/view/technical-reference.pdf']:
             response = self.client.get(url)
             self.assertEqual(response.status_code, 200, url)
             self.assertNotIn('sk-ant-synthetic', response.text, url)
             self.assertNotIn(test_pilot.CFG['auth_token'], response.text, url)
-        detail = self.client.get(f'/calls/{path.name}').text
+        detail = self.client.get(f'/calls/{path.stem}').text
         self.assertIn('&lt;b&gt;black&lt;/b&gt;', detail)  # caller text is escaped
         self.assertIn('Problem reported: It talked over me', detail)
         self.assertIn('not running', self.client.get('/').text)
 
     def test_paths_cannot_escape_their_folders(self):
-        for url in ['/calls/..%2Ftwilio-pilot.json', '/calls/nothing.jsonl', '/tests/..%2F..%2Fprivate-config', '/tests/20261126', '/reviews?file=../x.md']:
+        for url in ['/calls/..%2Ftwilio-pilot.json', '/calls/nothing.jsonl', '/calls/nothing', '/calls/..%2Ftwilio-pilot/raw', '/tests/..%2F..%2Fprivate-config', '/tests/20261126', '/reviews?file=../x.md']:
             self.assertIn(self.client.get(url).status_code, (403, 404), url)
 
     def test_actions_need_the_token(self):
@@ -91,7 +159,7 @@ class DashboardTests(unittest.TestCase):
 
     def test_call_becomes_scenario(self):
         path = self.make_call()
-        response = self.client.post(f'/calls/{path.name}/scenario', data={'token': dashboard.TOKEN}, follow_redirects=False)
+        response = self.client.post(f'/calls/{path.stem}/scenario', data={'token': dashboard.TOKEN}, follow_redirects=False)
         self.assertEqual(response.status_code, 303); self.assertIn('made=CALL-4721', response.headers['location'])
         ids = [s['id'] for s in json.loads(harness.SCENARIOS.read_text(encoding='utf-8'))['scenarios']]
         self.assertEqual(ids, ['X-1', 'CALL-4721'])
@@ -112,6 +180,10 @@ class DashboardTests(unittest.TestCase):
         html = dashboard.markdown('# Title\n- item <script>\n```\ncode <x>\n```\n**bold**')
         self.assertIn('<h2>Title</h2>', html); self.assertIn('&lt;script&gt;', html); self.assertIn('code &lt;x&gt;', html)
         self.assertIn('<b>bold</b>', html)
+        html = dashboard.markdown('1. one\n2. two\n\n[safe](flows.md) [bad](javascript:alert(1)) *it*\n\n| a | b |\n|---|---|\n| <i> | 2 |')
+        self.assertIn('<ol>\n<li>one</li>', html); self.assertIn('href="/docs/view/flows.md"', html)
+        self.assertNotIn('javascript:', html.replace('bad', '')); self.assertIn('<i>it</i>', html)
+        self.assertIn('<td>&lt;i&gt;</td>', html)
 
 
 if __name__ == '__main__':

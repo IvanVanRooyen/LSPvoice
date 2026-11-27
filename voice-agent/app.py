@@ -28,6 +28,7 @@ import flows
 from knowledge import Library
 import tickets
 import tools
+import transcripts
 from transcripts import CallTranscript
 from zoho_desk import ZohoDesk
 ROOT = Path(__file__).resolve().parents[1]
@@ -330,6 +331,9 @@ async def relay(ws:WebSocket):
             print(f"[pilot] turn on {str(sid)[-6:]}: first word {first}, total {data['total_ms']}ms, "
                   f"tools {','.join(data['tools']) or 'none'}",file=sys.stderr,flush=True)
         if transcript:transcript.event(kind,data)
+    def on_usage(model,usage):
+        # Token counts per API response, for the dashboard's cost and token figures.
+        if transcript:transcript.event('usage',transcripts.usage_record(model,usage))
     try:
         async with asyncio.timeout(CALL_SECONDS):
             setup=await asyncio.wait_for(ws.receive_json(),10)
@@ -343,7 +347,7 @@ async def relay(ws:WebSocket):
                 'reference':state.get('reference'),'caller':state.get('caller'),
                 'version':pilot_log.version_stamp(cfg,system_prompt(cfg),knowledge())})
             transcript.event('greeting',{'text':WELCOME})
-            convo=build_conversation(cfg,sid,state,send_token,on_event)
+            convo=build_conversation(cfg,sid,state,send_token,on_event,on_usage)
             for _ in range(MAX_EVENTS):
                 event=await ws.receive_json()
                 if event.get('type')=='prompt' and event.get('last') is True:
