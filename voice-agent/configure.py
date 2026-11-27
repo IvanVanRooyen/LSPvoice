@@ -30,6 +30,8 @@ SETTINGS = {
     'say_voice': None,
     'ticket_subject_prefix': None,
     'voice': None, 'ttsProvider': {'ElevenLabs', 'Google', 'Amazon'}, 'language': None, 'hints': None,
+    'echoPromptFiltering': {'true', 'false'}, 'welcomeGreetingInterruptible': {'none', 'dtmf', 'speech', 'any'},
+    'interruptSensitivity': {'high', 'medium', 'low'}, 'ignoreBackchannel': {'true', 'false'},
 }
 
 

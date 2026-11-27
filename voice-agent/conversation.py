@@ -89,6 +89,10 @@ class Conversation:
     async def _say(self, delta):
         if not delta:
             return
+        if self._question_pending:
+            # A question was asked before a tool ran: the caller hears it once, then we wait.
+            self._suppressed += delta
+            return
         if self._after_tool and self.partial and not self.partial[-1].isspace() and not delta[0].isspace():
             delta = ' ' + delta  # text spoken before and after a tool call: keep a word gap
         self._after_tool = False
@@ -104,6 +108,15 @@ class Conversation:
         self._after_tool = True
         self._timing['tools'].append(name + (':' + args['guide_id'] if name == 'get_guide' else ''))
         result = await self.run_tool(name, args)
+        spoken = self.partial.rstrip()
+        if isinstance(result, dict) and spoken.endswith('?'):
+            # The reply already ended with a question before this tool ran (the model spoke, then
+            # used a tool). The tool's next-step instruction would make it ask again, so tell it,
+            # and drop anything more it says in this reply (enforced in _say).
+            question = re.split(r'(?<=[.!?])\s+', spoken)[-1]
+            result = {**result, 'already_asked_caller': question,
+                      'say_next': 'Nothing more in this reply: wait for the caller to answer that question.'}
+            self._question_pending = True
         self._emit('tool', name=name, args=args, result=result)
         return result
 
@@ -115,6 +128,8 @@ class Conversation:
         self.partial = ''
         self._spoken = SpokenText()
         self._after_tool = False
+        self._question_pending = False
+        self._suppressed = ''
         self._timing = {'started': time.monotonic(), 'first': None, 'tools': []}
         self._emit('caller', text=text)
         system, specs = self.system(), self.specs()
@@ -128,6 +143,11 @@ class Conversation:
         tail = self._spoken.flush()
         if tail:
             await self._say(tail)
+        if self._suppressed.strip():
+            self._emit('suppressed', text=self._suppressed.strip())
+            flow = self.session.get('flow')
+            if flow and flow.get('readback') and flow.get('readback_turn') == self.session.get('caller_turns'):
+                flow['readback'] = None  # the caller never heard it: a new read-back must be said first
         first = self._timing['first']
         self._emit('turn', first_word_ms=None if first is None else round(first * 1000),
                    total_ms=round((time.monotonic() - self._timing['started']) * 1000), tools=list(self._timing['tools']))

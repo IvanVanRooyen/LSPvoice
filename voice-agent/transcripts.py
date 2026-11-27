@@ -80,6 +80,8 @@ def format_event(record):
     if kind == 'turn':
         first = record.get('first_word_ms')
         return f'{at}  ·       │ first word {first if first is not None else "-"} ms · turn {record.get("total_ms")} ms'
+    if kind == 'suppressed':
+        return f'{at}  (muted) │ not spoken, question already asked: "{_short(record.get("text", ""), 120)}"'
     if kind == 'error':
         return f'{at}  ERROR   │ {record.get("text")}'
     if kind == 'started':

@@ -49,7 +49,14 @@ WELCOME = "Hi, this is LSPcare's virtual support assistant, could I get your nam
 # ConversationRelay speech settings; each can be overridden in the private config.
 SAY_VOICE = 'Polly.Olivia-Neural'  # Twilio <Say> voice for the fixed final words (Australian English)
 VOICE_DEFAULTS = {'language': 'en-AU', 'ttsProvider': 'ElevenLabs', 'voice': '56bWURjYFHyYyVf490Dp',
-                  'hints': 'LSPcare,RAH,Royal Adelaide,RNS,RNSH,Royal North Shore,LSPC15mf,concession,Device ID'}
+                  'hints': 'LSPcare,RAH,Royal Adelaide,RNS,RNSH,Royal North Shore,LSPC15mf,concession,Device ID',
+                  # Echo and false interruptions (Twilio ConversationRelay docs, best practices): the agent's
+                  # own voice picked up by the caller's microphone was cutting off the greeting and being
+                  # transcribed as the caller's words. Filtering uses ElevenLabs word timings.
+                  'echoPromptFiltering': 'true',
+                  'welcomeGreetingInterruptible': 'none',  # the short greeting always plays in full
+                  'interruptSensitivity': 'medium',        # 'high' (default) is the easiest to trigger
+                  'ignoreBackchannel': 'true'}             # "yeah", "uh-huh" don't cut the agent off
 SYSTEM = '''You are LSPcare's virtual support assistant, an AI, answering a staff-test line.
 If asked whether you are a person, say honestly that you are LSPcare's virtual (AI)
 assistant. Speak Australian English, calmly and briefly. Use fictional patient details only.

@@ -142,6 +142,67 @@ class ToolTests(unittest.TestCase):
             self.assertEqual(set(tool['parameters']['required']), set(tool['parameters']['properties']))
 
 
+class CallBehaviourTests(unittest.TestCase):
+    def test_echo_and_interruption_settings_in_twiml(self):
+        from fastapi.testclient import TestClient
+        from xml.etree.ElementTree import fromstring
+        import test_pilot
+        app.sessions.clear()
+        cfg = dict(CLAUDE_CFG)
+        with patch.object(app, 'config', side_effect=lambda: cfg):
+            client = TestClient(app.app)
+            post = lambda sid: client.post('/voice', data={'AccountSid': cfg['account_sid'], 'CallSid': sid},
+                                           headers={'X-Twilio-Signature': test_pilot.RequestValidator(cfg['auth_token']).compute_signature(
+                                               cfg['public_base'] + '/voice', {'AccountSid': cfg['account_sid'], 'CallSid': sid})})
+            relay = fromstring(post('CA' + '1' * 32).text).find('Connect/ConversationRelay')
+            self.assertEqual((relay.get('echoPromptFiltering'), relay.get('welcomeGreetingInterruptible'),
+                              relay.get('interruptSensitivity'), relay.get('ignoreBackchannel')), ('true', 'none', 'medium', 'true'))
+            cfg['interruptSensitivity'] = 'low'
+            relay = fromstring(post('CA' + '2' * 32).text).find('Connect/ConversationRelay')
+            self.assertEqual(relay.get('interruptSensitivity'), 'low')
+        app.sessions.clear()
+
+    def test_question_before_a_tool_is_not_asked_again(self):
+        fake = FakeClient([FakeStream('Which hospital are you at?', content=[tool_use('start_flow', {'flow_id': 'log_ticket'})]),
+                           FakeStream('Which hospital are you at, Jo?')])  # the model asks again anyway
+        session = {}
+        events = []
+        heard = []
+        async def on_text(delta): heard.append(delta)
+        with patch.object(claude_reply.anthropic, 'AsyncAnthropic', return_value=fake), patch('sys.stderr', io.StringIO()):
+            convo = app.build_conversation({**CLAUDE_CFG, 'tickets': 'dry_run'}, 'CA-q', session, on_text,
+                                           lambda k, d: events.append((k, d)))
+            kind, spoken = run(convo.respond('The arm on my screen keeps dropping, please log a ticket.'))
+        self.assertEqual(spoken, 'Which hospital are you at?')
+        self.assertEqual(''.join(heard), 'Which hospital are you at?')  # the caller hears it once
+        self.assertIn(('suppressed', {'text': 'Which hospital are you at, Jo?'}), events)
+        self.assertEqual(convo.history[-1]['content'], 'Which hospital are you at?')
+        result = json.loads(fake.requests[1]['messages'][-1]['content'][0]['content'])
+        self.assertEqual(result['already_asked_caller'], 'Which hospital are you at?')
+        self.assertIn('wait for the caller', result['say_next'])
+
+    def test_unheard_read_back_cannot_be_confirmed(self):
+        session = {'caller_turns': 3, 'flow': {'id': 'log_ticket', 'values': {}, 'confirmed': False,
+                                               'readback': 'Just to confirm…', 'readback_turn': 4, 'result': None}}
+        fake = FakeClient([FakeStream('Is that your mobile?', content=[tool_use('lookup_device', {'hospital': 'RAH', 'bed_id': '1', 'device_id': ''})]),
+                           FakeStream('Just to confirm, Sam, Royal Adelaide…')])
+        async def on_text(_): pass
+        with patch.object(claude_reply.anthropic, 'AsyncAnthropic', return_value=fake), patch('sys.stderr', io.StringIO()),                 patch.object(app, 'lookup', return_value={'device_found': True}):
+            convo = app.build_conversation({**CLAUDE_CFG, 'tickets': 'dry_run'}, 'CA-s', session, on_text)
+            run(convo.respond('0400 123 456'))
+        self.assertIsNone(session['flow']['readback'])  # muted read-back is discarded, so a yes can't confirm it
+
+    def test_no_guard_when_no_question_was_asked(self):
+        fake = FakeClient([FakeStream('Please leave the arm as it is.', content=[tool_use('start_flow', {'flow_id': 'log_ticket'})]),
+                           FakeStream('Which hospital are you at?')])
+        async def on_text(_): pass
+        with patch.object(claude_reply.anthropic, 'AsyncAnthropic', return_value=fake), patch('sys.stderr', io.StringIO()):
+            convo = app.build_conversation({**CLAUDE_CFG, 'tickets': 'dry_run'}, 'CA-r', {}, on_text)
+            kind, spoken = run(convo.respond('The arm keeps dropping.'))
+        self.assertEqual(spoken, 'Please leave the arm as it is. Which hospital are you at?')
+        self.assertNotIn('already_asked_caller', json.loads(fake.requests[1]['messages'][-1]['content'][0]['content']))
+
+
 class TicketFlowConversationTests(unittest.TestCase):
     """A four-turn call through the real engine with a fake model, including a too-early confirm."""
 

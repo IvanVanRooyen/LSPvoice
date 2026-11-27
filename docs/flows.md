@@ -58,3 +58,21 @@ prints a Mermaid diagram for documents.
   model comment on them). After the fixes: 8/8 including repeats, and the 12 core non-ticket
   scenarios 12/12.
 - Open polish item: occasional narration such as "I'll look up your bed first".
+
+### Live phone test (27 Nov) and fixes
+
+- Call 1 (ticket) worked end to end (ticket logged in Zoho) but repeated a question ("…which
+  hospital are you at? Which hospital are you at, Sam?"). Cause: the model asked, then used a flow
+  tool, and the tool's next-step instruction made it ask again. Fix in `conversation.py`: once a
+  reply has asked a question before a tool runs, the tool result says so and anything further the
+  model says in that reply is dropped (logged as "muted"). If a read-back was dropped that way, it
+  is reset, so a "yes" can never confirm details the caller didn't hear.
+- Calls 2 and 3 were cut off during the greeting, and the agent used names the caller never said.
+  Cause: echo. The agent's voice came back through the caller's microphone, triggered an
+  interruption and was transcribed ("this is LSPcare's" → "This is Alice"). Fix: the call setup
+  now uses Twilio's documented `echoPromptFiltering="true"` (with ElevenLabs word timings), a
+  greeting that always plays in full (`welcomeGreetingInterruptible="none"`),
+  `interruptSensitivity="medium"` and `ignoreBackchannel="true"`. Each can be changed with
+  `configure.py --set`. Echo can only be confirmed on a real call, not in the harness.
+- After the fixes: 89 offline tests; harness 11/12 over two runs of six scenarios (the one fail was
+  a judge contradiction), with no repeated questions.

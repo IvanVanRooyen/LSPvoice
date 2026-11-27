@@ -326,6 +326,8 @@ async def call_detail(name: str, made: str = ''):
             parts.append(f'<div class="sys">first word {e(r.get("first_word_ms"))} ms · turn {e(r.get("total_ms"))} ms</div>')
         elif kind == 'finish':
             parts.append(f'<div class="sys">call ended by agent: {e(r.get("reason"))}</div>')
+        elif kind == 'suppressed':
+            parts.append(f'<div class="sys">muted (question already asked): "{e(r.get("text"))}"</div>')
         elif kind == 'error':
             parts.append(f'<div class="report">Error: {e(r.get("text"))}</div>')
     review_html = ('<p class="muted">Not reviewed yet.</p>' if reviewed is None else
