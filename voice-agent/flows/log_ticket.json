@@ -1,0 +1,110 @@
+{
+  "id": "log_ticket",
+  "title": "Log a support ticket",
+  "use_when": "The caller needs follow-up from the support team: a fault that could not be fixed on the phone, an arm fault, paid but not working, a double charge, or a request to be called back.",
+  "fields": {
+    "caller_name": {
+      "label": "Name",
+      "type": "text",
+      "max": 80,
+      "ask": "the caller's name"
+    },
+    "hospital": {
+      "label": "Hospital",
+      "type": "text",
+      "max": 80,
+      "ask": "which hospital"
+    },
+    "bed_id": {
+      "label": "Bed",
+      "type": "text",
+      "max": 40,
+      "optional": true,
+      "ask": "the bed number"
+    },
+    "device_id": {
+      "label": "Device ID",
+      "type": "text",
+      "max": 60,
+      "optional": true,
+      "ask": "the Device ID, only if they don't know the bed"
+    },
+    "callback_number": {
+      "label": "Callback number",
+      "type": "au_phone",
+      "ask": "an Australian mobile or landline number for a callback"
+    },
+    "issue_summary": {
+      "label": "Problem",
+      "type": "text",
+      "max": 600,
+      "ask": "what the problem is, in the caller's words (include the identified terminal if known)"
+    },
+    "steps_tried": {
+      "label": "Already tried",
+      "type": "text",
+      "max": 600,
+      "optional": true,
+      "ask": "approved steps already tried on this call"
+    },
+    "urgent": {
+      "label": "Urgent",
+      "type": "boolean",
+      "optional": true,
+      "ask": "true when the caller paid and it is not working, or was charged twice"
+    }
+  },
+  "steps": [
+    {
+      "id": "problem",
+      "kind": "collect",
+      "title": "Understand the problem",
+      "fields": [
+        "issue_summary"
+      ],
+      "also": [
+        "steps_tried",
+        "urgent"
+      ],
+      "instruction": "Make sure you understand the problem and what has already been tried, then record it. Mark it urgent if the caller paid and it is not working, or was charged twice."
+    },
+    {
+      "id": "location",
+      "kind": "collect",
+      "title": "Where is the screen",
+      "fields": [
+        "hospital"
+      ],
+      "one_of": [
+        "bed_id",
+        "device_id"
+      ],
+      "instruction": "Ask which hospital, then the bed number (or the Device ID if they don't know the bed). One question at a time."
+    },
+    {
+      "id": "contact",
+      "kind": "collect",
+      "title": "Who to call back",
+      "fields": [
+        "caller_name",
+        "callback_number"
+      ],
+      "instruction": "Ask for the caller's name, then an Australian number to call back on. One question at a time."
+    },
+    {
+      "id": "confirm",
+      "kind": "confirm",
+      "title": "Read back and confirm",
+      "instruction": "Say the read-back exactly as written, word for word, saying numbers digit by digit, then stop and wait for the caller's answer. Then call flow_confirm with yes or no. If something is wrong, ask what to change and record the corrected value."
+    },
+    {
+      "id": "log",
+      "kind": "action",
+      "title": "Log the ticket in Zoho Desk",
+      "action": "create_ticket",
+      "instruction": "The system logs the ticket after a yes."
+    }
+  ],
+  "on_success": "Tell the caller their ticket is logged and read the ticket number out, digit by digit. Do not promise a callback time.",
+  "on_failure": "Say honestly that the ticket could not be logged, apologise, and do not try again on this call."
+}

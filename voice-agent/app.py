@@ -24,6 +24,7 @@ from twilio.request_validator import RequestValidator
 from configure import CONFIG, validate_url
 from conversation import Conversation
 import pilot_log
+import flows
 from knowledge import Library
 import tickets
 import tools
@@ -37,6 +38,7 @@ from private_files import is_private, private_path
 app = FastAPI(title='LSPcare Twilio staff comparison pilot')
 inventory = StaticInventory(private_path('lspcare-inventory.json'))
 library = Library()
+FLOWS = flows.load_flows()  # invalid flow files stop the service at start-up
 desk = ZohoDesk()
 sessions = {}
 # Call limits: a support call with a ticket read-back can run well past 5 minutes.
@@ -60,6 +62,9 @@ Everything you write is spoken aloud on a phone call: use plain spoken sentences
 usually one to three per reply. Never use markdown, bold, bullet points, numbered
 lists or headings. Give at most two steps at a time, then check how it went.
 Reuse earlier lookup and guide results in this call instead of repeating them.
+Don't narrate what you are doing behind the scenes ("I'll record that", "let me look
+that up"); just give the answer or ask the next question. If you need a tool, call it
+before saying anything in that reply, then speak once.
 Help with buying/pricing questions, safe hardware advice from the supplied reviewed
 sources, and support tickets. Never take card/bank details.
 Call flow: the greeting has already asked for the caller's name or hospital. Use
@@ -92,14 +97,7 @@ uncomfortable reaching. Give at most the single approved wake step for the
 confirmed layout.
 For pain, injury, falls, needing a nurse or clinical help, call finish_call with
 reason clinical immediately. Do not give clinical advice or continue equipment help.
-Support tickets: use create_ticket when the caller needs follow-up from the support
-team (a fault you cannot fix, an arm fault, paid but not working, a callback
-request). First collect hospital, bed or Device ID, the caller's name, an Australian
-callback number and a short description of the problem; read them back and get a
-clear yes. Say a ticket is logged only when the tool returns a ticket number, then
-read the number out. If it fails, say so honestly and do not retry. One ticket per
-call. Never put card or bank details in a ticket. Do not promise a callback time.
-Staff testers may report a problem with you during a call (for example "I want to
+{tickets_section}Staff testers may report a problem with you during a call (for example "I want to
 report a problem" or "that answer was wrong"). If they do, ask briefly what went
 wrong if it is unclear, call report_problem with their description in their own
 words, thank them, give them the call reference from the result, and offer to carry on.
@@ -123,19 +121,68 @@ def knowledge():
     return library.system_text()
 
 
+TICKETS_DIRECT = '''Support tickets: use create_ticket when the caller needs follow-up from the support
+team (a fault you cannot fix, an arm fault, paid but not working, a callback
+request). First collect hospital, bed or Device ID, the caller's name, an Australian
+callback number and a short description of the problem; read them back and get a
+clear yes. Say a ticket is logged only when the tool returns a ticket number, then
+read the number out. If it fails, say so honestly and do not retry. One ticket per
+call. Never put card or bank details in a ticket. Do not promise a callback time.
+'''
+TICKETS_FLOW = '''Support tickets are logged only through the log_ticket flow. When the caller needs
+follow-up from the support team (a fault you cannot fix, an arm fault, paid but not
+working, a double charge, a callback request), call start_flow with log_ticket and follow
+the ACTIVE FLOW notes step by step, one question at a time. Record each detail with
+flow_record as soon as the caller gives it, recording only what the caller said (not
+lookup results). When the note gives a read-back, say it word for word,
+wait for the caller's answer, then call flow_confirm. Say a ticket is logged only when
+flow_confirm returns a ticket number, then read it out digit by digit. If it fails, say
+so honestly and do not retry. One ticket per call. Never record card or bank details.
+Do not promise a callback time.
+'''
+
+
+def flows_on(cfg):
+    return cfg.get('flows', 'on') != 'off' and cfg.get('tickets', 'dry_run') != 'off'
+
+
 def tool_specs(cfg):
     return tools.specs(library.guide_ids(), search=library.has_search(),
                        tickets=cfg.get('tickets', 'dry_run') != 'off',
-                       feedback=cfg.get('staff_feedback', 'on') != 'off')
+                       feedback=cfg.get('staff_feedback', 'on') != 'off',
+                       flows=FLOWS if flows_on(cfg) else None)
 
 
-def system_prompt():
-    return SYSTEM + '\n\n' + knowledge()
+def system_prompt(cfg=None):
+    tickets_section = TICKETS_FLOW if flows_on(cfg or {}) else TICKETS_DIRECT
+    return SYSTEM.replace('{tickets_section}', tickets_section) + '\n\n' + knowledge()
 
 
 def make_runner(cfg, sid, session):
-    """Async tool dispatcher for one call, shared by both AI providers (finish_call is handled by the loops)."""
+    """Async tool dispatcher for one call, shared by both AI providers (finish_call is handled by the loops).
+
+    The flow engine is attached as run_tool.engine; its note() feeds the conversation.
+    """
+    async def create_ticket_action(values):
+        args = {'hospital': values.get('hospital', ''), 'bed_id': values.get('bed_id', ''),
+                'device_id': values.get('device_id', ''), 'caller_name': values.get('caller_name', ''),
+                'callback_number': values.get('callback_number', ''), 'issue_summary': values.get('issue_summary', ''),
+                'steps_tried': values.get('steps_tried', ''), 'urgent': bool(values.get('urgent')),
+                'caller_confirmed': True}  # the flow engine has enforced the read-back and the yes
+        result = await tickets.create(session, args, cfg, desk, lookup, sid)
+        return {'ok': bool(result.get('ticket_logged')), **result, 'args': args}
+
+    engine = flows.FlowEngine(session, FLOWS, {'create_ticket': create_ticket_action})
+
     async def run_tool(name, args):
+        if name == 'start_flow':
+            return engine.start(args['flow_id'])
+        if name == 'flow_record':
+            return engine.record(args['values'])
+        if name == 'flow_confirm':
+            return await engine.confirm(args['answer'])
+        if name == 'flow_cancel':
+            return engine.cancel(args['reason'])
         if name == 'lookup_device':
             return lookup(args['hospital'], args['bed_id'], args['device_id'])
         if name == 'get_guide':
@@ -147,7 +194,15 @@ def make_runner(cfg, sid, session):
         if name == 'report_problem':
             return pilot_log.record_report(session, args['description'], sid)
         raise ValueError('Unknown tool')
+    run_tool.engine = engine
     return run_tool
+
+
+def build_conversation(cfg, sid, session, on_text, on_event=None, on_usage=None):
+    """The one place a call's conversation is assembled: used by the phone relay and the harness."""
+    runner = make_runner(cfg, sid, session)
+    return Conversation(cfg, lambda: system_prompt(cfg), lambda: tool_specs(cfg), runner, on_text, on_event,
+                        on_usage=on_usage, session=session, note=runner.engine.note if flows_on(cfg) else None)
 
 
 def lookup(hospital, bed_id, device_id):
@@ -279,9 +334,9 @@ async def relay(ws:WebSocket):
             state['connected']=True
             transcript=CallTranscript(sid,cfg.get('transcripts')=='on',details={
                 'reference':state.get('reference'),'caller':state.get('caller'),
-                'version':pilot_log.version_stamp(cfg,SYSTEM,knowledge())})
+                'version':pilot_log.version_stamp(cfg,system_prompt(cfg),knowledge())})
             transcript.event('greeting',{'text':WELCOME})
-            convo=Conversation(cfg,system_prompt,lambda:tool_specs(cfg),make_runner(cfg,sid,state),send_token,on_event)
+            convo=build_conversation(cfg,sid,state,send_token,on_event)
             for _ in range(MAX_EVENTS):
                 event=await ws.receive_json()
                 if event.get('type')=='prompt' and event.get('last') is True:

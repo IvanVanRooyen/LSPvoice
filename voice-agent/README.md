@@ -13,6 +13,7 @@ decides each reply.
 | `claude_reply.py` | Claude request options, streaming, tool rounds |
 | `tools.py` | Tool definitions and exact-schema validation |
 | `knowledge.py` | Staged knowledge from `../knowledge/registry.json` (core / guide / search), hash-checked |
+| `flows.py`, `flows/*.json` | Flow engine and flow definitions: code-enforced step order (tickets) — [docs/flows.md](../docs/flows.md) |
 | `tickets.py`, `zoho_desk.py` | Guarded `create_ticket` and the Zoho Desk client |
 | `transcripts.py` | Live call transcripts (pilot window + private file), lookup by call reference |
 | `pilot_log.py` | Staff pilot: call references, version stamps, spoken problem reports |
@@ -73,6 +74,7 @@ Code changes need a restart.
 | `tickets` | `dry_run` · `live` · `off` |
 | `transcripts` | `on` · `off` |
 | `call_reference` | `on` (default: reference spoken at the end of each call) · `off` |
+| `flows` | `on` (default: tickets only through the ticket flow) · `off` (direct ticket tool) |
 | `staff_feedback` | `on` (default: callers can report a problem by voice) · `off` |
 | `say_voice` | voice for the fixed final words, default `Polly.Olivia-Neural` |
 | `voice`, `ttsProvider`, `language`, `hints` | ConversationRelay speech settings |
@@ -81,7 +83,7 @@ Code changes need a restart.
 ## Test
 
 ```powershell
-.venv\Scripts\python.exe -m unittest test_pilot test_claude test_stages test_harness test_pilot_loop test_dashboard
+.venv\Scripts\python.exe -m unittest test_pilot test_claude test_stages test_harness test_pilot_loop test_dashboard test_flows
 .venv\Scripts\python.exe harness.py --list
 .venv\Scripts\python.exe harness.py --only HW-01 --set thinking=adaptive
 .venv\Scripts\python.exe review.py                 # review new staff calls (capped at US$0.20)

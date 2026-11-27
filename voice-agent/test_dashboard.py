@@ -57,7 +57,7 @@ class DashboardTests(unittest.TestCase):
     def test_every_page_renders_and_never_shows_secrets(self):
         path = self.make_call()
         for url in ['/', '/calls', '/calls?show=attention', f'/calls/{path.name}', '/reports', '/reviews', '/tests',
-                    '/settings', '/knowledge']:
+                    '/flows', '/settings', '/knowledge']:
             response = self.client.get(url)
             self.assertEqual(response.status_code, 200, url)
             self.assertNotIn('sk-ant-synthetic', response.text, url)

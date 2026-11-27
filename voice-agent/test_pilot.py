@@ -104,7 +104,7 @@ class PilotTests(unittest.TestCase):
         result=json.loads(output['output'])
         self.assertTrue(result['device_found']);self.assertFalse(result['account_state_known'])
         self.assertIsNone(result['balance_owing'])
-        self.assertEqual({t['name'] for t in fake.requests[0]['tools']},{'lookup_device','finish_call','get_guide','create_ticket','report_problem'})
+        self.assertEqual({t['name'] for t in fake.requests[0]['tools']},{'lookup_device', 'finish_call', 'get_guide', 'report_problem', 'start_flow', 'flow_record', 'flow_confirm', 'flow_cancel'})
         self.assertFalse(fake.requests[0]['store'])
 
     def test_clinical_end_callback_is_fixed_and_ends_call(self):

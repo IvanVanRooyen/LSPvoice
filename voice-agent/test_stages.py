@@ -272,6 +272,7 @@ class CallIntegrationTests(unittest.TestCase):
         self.assertEqual(fromstring(self.post('/voice').text).find('Connect/ConversationRelay').get('voice'), 'otherVoiceId1234567890')
 
     def test_guide_fetch_and_ticket_in_one_call_with_timing_log(self):
+        self.cfg['flows'] = 'off'  # the direct create_ticket path
         fake = FakeClient([
             FakeStream(content=[tool_use('get_guide', {'guide_id': 'KB-TERMINAL-LSPC15MF'})]),
             FakeStream(content=[tool_use('create_ticket', dict(GOOD), 'toolu_2')]),

@@ -12,7 +12,7 @@ Three layers, each for a different job.
 
 ```powershell
 cd voice-agent
-.venv\Scripts\python.exe -m unittest test_pilot test_claude test_stages test_harness test_pilot_loop test_dashboard
+.venv\Scripts\python.exe -m unittest test_pilot test_claude test_stages test_harness test_pilot_loop test_dashboard test_flows
 cd ..\mock-backend
 .venv\Scripts\python.exe -m unittest test_static_inventory test_vouchers
 ```

@@ -85,7 +85,7 @@ class ScenarioRunTests(unittest.TestCase):
         meter = harness.Meter(1)
         with tempfile.TemporaryDirectory() as folder, patch.object(tickets, 'DRY_RUN_LOG', Path(folder) / 't.jsonl'), \
                 patch.object(claude_reply.anthropic, 'AsyncAnthropic', return_value=fake), patch('sys.stderr', io.StringIO()):
-            cfg = {**CLAUDE_CFG, 'tickets': 'dry_run'}
+            cfg = {**CLAUDE_CFG, 'tickets': 'dry_run', 'flows': 'off'}  # direct ticket path
             run = asyncio.run(harness.run_scenario(scenario, cfg, meter, None, 'CA-test'))
             self.assertTrue(Path(folder, 't.jsonl').exists())
         self.assertIsNone(run['error']); self.assertEqual(run['finish'], 'goodbye')

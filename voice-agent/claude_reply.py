@@ -40,7 +40,7 @@ def request_options(cfg):
     return options
 
 
-async def reply(cfg, system, history, tool_specs, run_tool, on_text, on_usage=None, exchange=None):
+async def reply(cfg, system, history, tool_specs, run_tool, on_text, on_usage=None, exchange=None, note=None):
     """Return ('text', spoken) or ('finish', reason).
 
     history holds earlier turns: text turns, plus the tool calls and results of earlier turns.
@@ -48,6 +48,9 @@ async def reply(cfg, system, history, tool_specs, run_tool, on_text, on_usage=No
     in history: without them the model forgets it already looked a bed up or opened a guide.
     Thinking blocks are not kept across turns (allowed by the API; avoids history-edit checks).
     on_usage(model, usage) is called after every API response (used by the test harness for cost).
+    note() returns the active flow's current step (or None). It is appended once, at the start of
+    the turn, as a mid-conversation system message after the caller's words; notes are not kept in
+    history, so the cached rules and tools stay unchanged.
     """
     # An interruption before any word was heard leaves an empty assistant turn; the API rejects those.
     messages = [{'role': m['role'], 'content': m['content']} for m in history if m['content']]
@@ -57,8 +60,15 @@ async def reply(cfg, system, history, tool_specs, run_tool, on_text, on_usage=No
     json_retries = 0
     async with anthropic.AsyncAnthropic(api_key=cfg['anthropic_api_key'], max_retries=0, timeout=25) as client:
         rounds = 0
+        last_note = None
         while rounds < ROUNDS:
             said_this_round = ''
+            # Only at the start of the turn: mid-turn, the flow tools' results carry the updated step,
+            # and notes after every tool result can make the model treat them as suspicious.
+            current_note = note() if note and rounds == 0 and json_retries == 0 else None
+            if current_note and current_note != last_note:
+                messages.append({'role': 'system', 'content': current_note})
+                last_note = current_note
             try:
                 async with client.beta.messages.stream(
                         max_tokens=16000, system=system, messages=messages, tools=definitions,

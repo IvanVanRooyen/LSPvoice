@@ -59,8 +59,12 @@ class SpokenText:
 
 
 class Conversation:
-    def __init__(self, cfg, system, specs, run_tool, on_text, on_event=None, on_usage=None):
-        """system and specs are callables, rebuilt each turn so knowledge checks run every time."""
+    def __init__(self, cfg, system, specs, run_tool, on_text, on_event=None, on_usage=None, session=None, note=None):
+        """system and specs are callables, rebuilt each turn so knowledge checks run every time.
+
+        session (the call's state dict) gets a caller-turn counter used by the flow engine;
+        note() returns the active flow's step note, appended to each request while a flow runs.
+        """
         self.cfg = cfg
         self.system = system
         self.specs = specs
@@ -68,6 +72,8 @@ class Conversation:
         self.on_text = on_text
         self.on_event = on_event
         self.on_usage = on_usage
+        self.session = session if session is not None else {}
+        self.note = note
         self.history = []
         self.partial = ''
         self.last_assistant = None
@@ -104,6 +110,7 @@ class Conversation:
     async def respond(self, text):
         """Run one caller turn. Returns ('text', spoken) or ('finish', reason); raises on failure."""
         self.history.append({'role': 'user', 'content': text[:4000]})
+        self.session['caller_turns'] = self.session.get('caller_turns', 0) + 1
         self.last_assistant = None
         self.partial = ''
         self._spoken = SpokenText()
@@ -114,7 +121,8 @@ class Conversation:
         exchange = []  # this turn's tool calls/results (Claude path), kept so later turns can see them
         if self.cfg.get('provider') == 'anthropic':
             kind, value = await claude_reply.reply(self.cfg, system, self.history, specs, self._tool,
-                                                   self._speak, on_usage=self.on_usage, exchange=exchange)
+                                                   self._speak, on_usage=self.on_usage, exchange=exchange,
+                                                   note=self.note)
         else:
             kind, value = await self._openai(system, specs)
         tail = self._spoken.flush()
@@ -151,8 +159,13 @@ class Conversation:
     async def _openai(self, system, specs):
         cfg = self.cfg
         inputs = list(self.history)
+        last_note = None
         async with AsyncOpenAI(api_key=cfg['openai_api_key'], max_retries=0, timeout=25) as client:
-            for _ in range(4):
+            for round_number in range(4):
+                current_note = self.note() if self.note and round_number == 0 else None
+                if current_note and current_note != last_note:
+                    inputs.append({'role': 'developer', 'content': current_note})
+                    last_note = current_note
                 options = {'reasoning': {'effort': 'none'}} if cfg['model'] == 'gpt-6.1-terra' else {}
                 async with client.responses.stream(model=cfg['model'], instructions=system, input=inputs,
                                                    tools=tools.openai_tools(specs), store=False,

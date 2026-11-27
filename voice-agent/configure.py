@@ -26,6 +26,7 @@ SETTINGS = {
     'transcripts': {'on', 'off'},
     'call_reference': {'on', 'off'},
     'staff_feedback': {'on', 'off'},
+    'flows': {'on', 'off'},
     'say_voice': None,
     'ticket_subject_prefix': None,
     'voice': None, 'ttsProvider': {'ElevenLabs', 'Google', 'Amazon'}, 'language': None, 'hints': None,

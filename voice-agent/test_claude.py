@@ -86,7 +86,7 @@ class ClaudeTests(unittest.TestCase):
         self.assertEqual(first['fallbacks'], 'default'); self.assertIn('server-side-fallback-2026-07-01', first['betas'])
         self.assertEqual(first['cache_control'], {'type': 'ephemeral'})
         self.assertEqual(first['thinking'], {'type': 'between_tools'})  # thinking off by default on Sonnet 5.5
-        self.assertEqual({t['name'] for t in first['tools']}, {'lookup_device', 'finish_call', 'get_guide', 'create_ticket', 'report_problem'})
+        self.assertEqual({t['name'] for t in first['tools']}, {'lookup_device', 'finish_call', 'get_guide', 'report_problem', 'start_flow', 'flow_record', 'flow_confirm', 'flow_cancel'})
         self.assertIn('SOURCE KB-PRICES', first['system'])
         result = second['messages'][-1]['content'][0]
         self.assertEqual(result['tool_use_id'], 'toolu_1'); self.assertTrue(json.loads(result['content'])['device_found'])

@@ -32,7 +32,6 @@ import anthropic
 import app
 import claude_reply
 import configure
-from conversation import Conversation
 import pilot_log
 import tickets
 
@@ -138,9 +137,20 @@ def _label(spec):
     return spec if isinstance(spec, str) else spec['name'] + json.dumps(spec.get('args', {}))
 
 
+def ticket_calls(calls):
+    """Ticket attempts, whether the AI called create_ticket directly or a flow logged it."""
+    found = [c for c in calls if c['name'] == 'create_ticket']
+    for c in calls:
+        result = c.get('result') or {}
+        if c['name'] == 'flow_confirm' and result.get('action') == 'create_ticket':
+            found.append({'name': 'create_ticket', 'args': result['result'].get('args', {}), 'result': result['result']})
+    return found
+
+
 def hard_checks(expect, run):
     checks = []
-    calls = run['tools']
+    # Tickets logged by a flow count as create_ticket calls for every tool check.
+    calls = run['tools'] + [c for c in ticket_calls(run['tools']) if c not in run['tools']]
     agent_text = ' '.join(t for s, t in run['transcript'] if s == 'agent').casefold()
 
     def add(name, passed, detail=''):
@@ -157,7 +167,7 @@ def hard_checks(expect, run):
     if 'finish' in expect:
         wanted = expect['finish']
         add(f'call ending: {wanted}', run['finish'] == (None if wanted == 'none' else wanted), f'got {run["finish"]}')
-    tickets_logged = [c for c in calls if c['name'] == 'create_ticket' and (c['result'] or {}).get('ticket_logged')
+    tickets_logged = [c for c in ticket_calls(run['tools']) if (c['result'] or {}).get('ticket_logged')
                       and not (c['result'] or {}).get('already_logged')]
     if expect.get('ticket') == 'created':
         add('one ticket created', len(tickets_logged) == 1, f'{len(tickets_logged)} logged')
@@ -177,7 +187,7 @@ def hard_checks(expect, run):
                  and re.search(r'\*\*|^\s*(?:[-*•]|\d+[.)]|#+)\s', t, re.MULTILINE)]
     add('spoken style: no markdown or lists', not formatted, _short(formatted[0]) if formatted else '')
     # Always: nothing that looks like a card number ever reaches a tool.
-    leaked = [c['name'] for c in calls if any(tickets.has_card_number(v) for v in c['args'].values() if isinstance(v, str))]
+    leaked = [c['name'] for c in calls if tickets.has_card_number(json.dumps(c['args'], ensure_ascii=False))]
     add('no card numbers passed to tools', not leaked, ', '.join(leaked))
     return checks
 
@@ -267,8 +277,7 @@ async def run_scenario(scenario, cfg, meter, client, sid):
         elif kind == 'turn':
             run['turns'].append({'first_word_ms': data['first_word_ms'], 'total_ms': data['total_ms']})
 
-    convo = Conversation(cfg, app.system_prompt, lambda: app.tool_specs(cfg), app.make_runner(cfg, sid, session),
-                         on_text, on_event, on_usage=meter.add)
+    convo = app.build_conversation(cfg, sid, session, on_text, on_event, on_usage=meter.add)
     caller = scenario['caller']
     script, brief = caller.get('script'), caller.get('brief')
     limit = len(script) if script else caller.get('max_turns', 8)

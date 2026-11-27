@@ -24,6 +24,7 @@ from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 import configure
+import flows as flow_engine
 import harness
 from knowledge import CORE_LIMIT, DELIVERY, LIBRARY, Library
 import pilot_log
@@ -84,11 +85,12 @@ button.secondary{background:var(--navy)}input,select{padding:6px 8px;border:1px 
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}pre{background:#fff;border:1px solid var(--line);border-radius:8px;padding:10px;white-space:pre-wrap;font-size:12px}
 .log{background:#101828;color:#e4e7ec;border-radius:8px;padding:10px;font:12px Consolas,monospace;white-space:pre-wrap;min-height:120px}
 details{background:#fff;border:1px solid var(--line);border-radius:8px;padding:8px 12px;margin:8px 0}summary{cursor:pointer;font-weight:600}
+.flow{display:flex;flex-direction:column;align-items:center;gap:0;max-width:560px}.fstep{width:100%;border-radius:10px;padding:10px 14px;border:1px solid var(--line);background:#fff}.fstep.collect{border-left:5px solid var(--teal)}.fstep.confirm{border-left:5px solid var(--amber);background:var(--amber-soft)}.fstep.action{border-left:5px solid var(--violet);background:var(--violet-soft)}.fstep.end{text-align:center;background:var(--soft)}.arrow{color:var(--muted);font-size:18px;line-height:22px}.kind{font-size:11px;font-weight:700;text-transform:uppercase;color:var(--muted)}
 .notice{background:var(--amber-soft);border:1px solid #efd7a6;border-radius:8px;padding:8px 12px;margin:10px 0}
 """
 
 NAV = [('/', 'Overview'), ('/calls', 'Calls'), ('/reports', 'Reports'), ('/reviews', 'Reviews'),
-       ('/tests', 'Tests'), ('/settings', 'Settings'), ('/knowledge', 'Knowledge')]
+       ('/tests', 'Tests'), ('/flows', 'Flows'), ('/settings', 'Settings'), ('/knowledge', 'Knowledge')]
 
 
 def page(title, body, active='/'):
@@ -505,7 +507,7 @@ async def settings_page(saved: str = ''):
         'thinking': 'between_tools = off (fastest); adaptive = may think before replying',
         'tickets': 'live = real Zoho tickets; dry_run = saved locally; off = no ticket tool',
         'transcripts': 'Save and show call transcripts (staff pilot only)', 'call_reference': 'Speak a call reference at the end',
-        'staff_feedback': 'Let callers report a problem by voice', 'say_voice': 'Voice for the fixed final words',
+        'staff_feedback': 'Let callers report a problem by voice', 'flows': 'on = tickets only through the ticket flow; off = direct ticket tool', 'say_voice': 'Voice for the fixed final words',
         'ticket_subject_prefix': 'Added to every ticket subject', 'voice': 'ElevenLabs voice ID for the agent',
         'ttsProvider': 'Speech provider', 'language': 'Speech language', 'hints': 'Words the speech recogniser should expect'}
     rows = []
@@ -549,6 +551,50 @@ async def settings_save(token: str = Form(''), key: str = Form(...), value: str 
     return RedirectResponse(f'/settings?saved={key}', status_code=303)
 
 
+@app.get('/flows')
+async def flows_page():
+    try:
+        defs = flow_engine.load_flows()
+    except flow_engine.FlowError as error:
+        return page('Flows', f'<h1>Flows</h1><p><span class="pill bad">Flow files are invalid: {e(error)}</span></p>', '/flows')
+    cfg = read_config()
+    state = ('<span class="pill ok">on</span>' if cfg.get('flows', 'on') != 'off'
+             else '<span class="pill warn">off: tickets use the direct tool</span>')
+    blocks = []
+    for flow in defs.values():
+        fields = flow['fields']
+        steps = [f'<div class="fstep end"><b>{e(flow["title"])}</b><div class="muted">starts when: {e(flow["use_when"])}</div></div>']
+        for number, step in enumerate(flow['steps'], 1):
+            if step['kind'] == 'collect':
+                need = [fields[f]['label'] for f in step.get('fields', [])]
+                if step.get('one_of'):
+                    need.append(' or '.join(fields[f]['label'] for f in step['one_of']))
+                extra = [fields[f]['label'] for f in step.get('also', [])]
+                detail = ('Needs: ' + ', '.join(need)) + ((' · optional: ' + ', '.join(extra)) if extra else '')
+                kind = 'collect · each value checked in code'
+            elif step['kind'] == 'confirm':
+                detail = 'System writes the read-back; the caller must say yes in a later turn. "No" → correct a detail → new read-back.'
+                kind = 'confirm'
+            else:
+                detail = f'System runs {step["action"]} only after the yes. The AI cannot run it directly.'
+                kind = 'action'
+            steps.append('<div class="arrow">↓</div>')
+            steps.append(f'<div class="fstep {step["kind"]}"><div class="kind">{number} · {e(kind)}</div><b>{e(step["title"])}</b>'
+                         f'<div class="muted">{e(detail)}</div><div style="margin-top:4px">{e(step["instruction"])}</div></div>')
+        steps.append('<div class="arrow">↓</div>')
+        steps.append(f'<div class="fstep end"><div class="muted">Success: {e(flow["on_success"])}<br>Failure: {e(flow["on_failure"])}</div></div>')
+        field_rows = ''.join(f"<tr><td>{e(spec['label'])}</td><td><code>{e(name)}</code></td><td>{e(spec['type'])}</td>"
+                             f"<td>{'optional' if spec.get('optional') else 'required'}</td><td class='muted'>{e(spec.get('ask', ''))}</td></tr>"
+                             for name, spec in fields.items())
+        blocks.append(f"""<h2>{e(flow['title'])} <span class="muted">({e(flow['id'])})</span></h2>
+          <div class="grid2"><div class="flow">{''.join(steps)}</div>
+          <div><table><tr><th>Field</th><th>Name</th><th>Type</th><th></th><th>Asked as</th></tr>{field_rows}</table>
+          <details><summary>Mermaid diagram (for documents)</summary><pre>{e(flow_engine.mermaid(flow))}</pre></details></div></div>""")
+    body = (f'<h1>Flows</h1><p>Flows are {state}. Each flow is a file in <code>voice-agent/flows/</code>; this page is drawn from those files. '
+            'The order is enforced in code: a step\'s tools are refused until the earlier steps are done.</p>' + ''.join(blocks))
+    return page('Flows', body, '/flows')
+
+
 @app.get('/knowledge')
 async def knowledge_page():
     registry = json.loads((LIBRARY / 'registry.json').read_text(encoding='utf-8'))
@@ -574,6 +620,10 @@ async def knowledge_page():
 
 def main():
     import uvicorn
+    global PORT, ALLOWED_HOSTS
+    if '--port' in sys.argv:  # e.g. run a branch's dashboard next to the main one: --port 8103
+        PORT = int(sys.argv[sys.argv.index('--port') + 1])
+        ALLOWED_HOSTS = {f'{HOST}:{PORT}', f'localhost:{PORT}'}
     if sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
         sys.stdout.reconfigure(encoding='utf-8')
     print(f'Dashboard: http://{HOST}:{PORT}  (this PC only; Ctrl+C to stop)', flush=True)

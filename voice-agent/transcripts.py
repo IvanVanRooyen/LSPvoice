@@ -37,6 +37,22 @@ def _tool_summary(name, args, result):
         return f"get_guide({args.get('guide_id')}) → {'v' + str(result.get('version')) if result.get('found') else 'not found'}"
     if name == 'search_knowledge':
         return f"search_knowledge({args.get('query')!r}) → {len(result.get('results', []))} sections"
+    if name == 'start_flow':
+        return (f"flow started: {args.get('flow_id')} → step {result.get('step')}" if result.get('started')
+                else f"start_flow({args.get('flow_id')}) refused: {result.get('reason')}")
+    if name == 'flow_record':
+        recorded = '; '.join(f'{k} = {v}' for k, v in (result.get('recorded') or {}).items()) or 'nothing new'
+        problems = '; '.join(f'{k}: {v}' for k, v in (result.get('problems') or {}).items())
+        return f"flow: recorded {recorded}" + (f" · refused {problems}" if problems else '') + f" → next: {result.get('step')}"
+    if name == 'flow_confirm':
+        if not result.get('confirmed'):
+            return f"flow_confirm({args.get('answer')}) not accepted: {result.get('reason')}"
+        inner = result.get('result') or {}
+        if inner.get('ticket_logged'):
+            return f"flow confirmed → ticket #{inner.get('ticket_number')}" + (' (dry run)' if inner.get('dry_run') else '')
+        return f"flow confirmed → {result.get('action')} failed: {inner.get('reason')}"
+    if name == 'flow_cancel':
+        return f"flow cancelled: {args.get('reason')}"
     if name == 'report_problem':
         return f"⚑ PROBLEM REPORTED: {args.get('description')}"
     if name == 'create_ticket':
