@@ -37,6 +37,7 @@ class DashboardTests(unittest.TestCase):
                         patch.object(harness, 'RUNS', root / 'runs'), patch.object(harness, 'SCENARIOS', scenarios),
                         patch.object(pilot_log, 'FEEDBACK_LOG', root / 'feedback.jsonl'),
                         patch.object(issues, 'STORE', root / 'issues.json'),
+                        patch.object(dashboard, 'SETTINGS_LOG', root / 'settings-log.jsonl'),
                         patch.object(dashboard, 'PILOT_HEALTH', 'http://127.0.0.1:9/health')]
         for p in self.patches:
             p.start(); self.addCleanup(p.stop)
@@ -159,6 +160,65 @@ class DashboardTests(unittest.TestCase):
             bad = self.client.post('/settings', data={'token': dashboard.TOKEN, 'key': key, 'value': value})
             self.assertEqual(bad.status_code, 400, key)
         self.assertEqual(json.loads(self.config.read_text(encoding='utf-8'))['effort'], 'medium')
+
+    def test_settings_grouped_confirmed_logged_and_undone(self):
+        saved = lambda: json.loads(self.config.read_text(encoding='utf-8'))
+        start = saved().get('tickets', '')
+        text = self.client.get('/settings').text
+        for heading in ['AI model', 'Conversation and tickets', 'Voice and speech', 'Staff pilot']:
+            self.assertIn(f'<h2>{heading}</h2>', text)
+        self.assertIn('placeholder="default: 56bWURjYFHyYyVf490Dp"', text)  # defaults come from the voice agent
+        # Going live with tickets needs a second, explicit click; nothing is saved before it.
+        ask = self.client.post('/settings', data={'token': dashboard.TOKEN, 'key': 'tickets', 'value': 'live'})
+        self.assertEqual(ask.status_code, 200); self.assertIn('real Zoho Desk tickets', ask.text)
+        self.assertIn('name="confirm" value="yes"', ask.text)
+        self.assertEqual(saved().get('tickets', ''), start)
+        done = self.client.post('/settings', data={'token': dashboard.TOKEN, 'key': 'tickets', 'value': 'live', 'confirm': 'yes'},
+                                follow_redirects=False)
+        self.assertEqual(done.status_code, 303); self.assertEqual(saved()['tickets'], 'live')
+        log = dashboard.settings_log()
+        self.assertEqual((log[-1]['key'], log[-1]['old'], log[-1]['new']), ('tickets', start, 'live'))
+        self.assertTrue(is_private(dashboard.SETTINGS_LOG))
+        history = self.client.get('/settings').text
+        self.assertIn('Change history', history); self.assertIn('Undo', history)
+        # Undo puts the old value back (going back to dry run needs no confirmation) and is logged too.
+        self.client.post('/settings', data={'token': dashboard.TOKEN, 'key': 'tickets', 'value': start})
+        self.assertEqual(saved().get('tickets', ''), start); self.assertEqual(len(dashboard.settings_log()), 2)
+        # Harmless changes save straight away; saving the same value logs nothing.
+        self.client.post('/settings', data={'token': dashboard.TOKEN, 'key': 'call_reference', 'value': 'off'})
+        self.client.post('/settings', data={'token': dashboard.TOKEN, 'key': 'call_reference', 'value': 'off'})
+        self.assertEqual(saved()['call_reference'], 'off'); self.assertEqual(len(dashboard.settings_log()), 3)
+        self.assertIsNone(dashboard.setting_risk('tickets', 'live', 'dry_run'))
+        self.assertIsNone(dashboard.setting_risk('tickets', '', 'dry_run'))  # default is already dry_run
+        self.assertTrue(dashboard.setting_risk('transcripts', 'on', 'off'))
+
+    def test_knowledge_edit_preview_and_save(self):
+        import shutil
+        import knowledge
+        lib = self.root / 'knowledge'
+        shutil.copytree(knowledge.LIBRARY, lib, ignore=shutil.ignore_patterns('archive'))
+        with patch.object(dashboard, 'LIBRARY', lib):
+            self.assertIn('href="/knowledge/KB-PRICES"', self.client.get('/knowledge').text)
+            view = self.client.get('/knowledge/KB-PRICES').text
+            self.assertIn('fingerprint matches', view); self.assertIn('/knowledge/KB-PRICES/edit', view)
+            form = self.client.get('/knowledge/KB-PRICES/edit').text
+            version = re.search(r'name="version" value="([^"]+)"', form).group(1)
+            text = (lib / 'content' / 'prices-and-concessions.md').read_text(encoding='utf-8') + 'Test line <b>.\n'
+            data = {'token': dashboard.TOKEN, 'version': version, 'text': text, 'description': '', 'role': 'Product owner',
+                    'note': 'Added a test line'}
+            self.assertEqual(self.client.post('/knowledge/KB-PRICES/preview', data={**data, 'token': 'x'}).status_code, 403)
+            preview = self.client.post('/knowledge/KB-PRICES/preview', data=data).text
+            self.assertIn('Checked on a copy', preview); self.assertIn('+Test line &lt;b&gt;.', preview)
+            self.assertEqual((lib / 'content' / 'prices-and-concessions.md').read_text(encoding='utf-8'), text[:-len('Test line <b>.\n')])
+            bad = self.client.post('/knowledge/KB-PRICES/preview', data={**data, 'role': 'Jane Smith 0412'}).text
+            self.assertIn('by role', bad); self.assertIn('Test line &lt;b&gt;.', bad)  # the edit is kept for fixing
+            done = self.client.post('/knowledge/KB-PRICES/save', data=data, follow_redirects=False)
+            self.assertEqual(done.status_code, 303)
+            self.assertIn('Saved as version', self.client.get(done.headers['location']).text)
+            self.assertIn('Test line', knowledge.Library(lib).system_text())
+            again = self.client.post('/knowledge/KB-PRICES/save', data=data).text  # stale version
+            self.assertIn('changed since you opened it', again)
+            self.assertEqual(self.client.get('/knowledge/..%2Fregistry').status_code, 404)
 
     def test_call_becomes_scenario(self):
         path = self.make_call()

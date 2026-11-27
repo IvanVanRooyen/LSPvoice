@@ -29,10 +29,13 @@ import configure
 import flows as flow_engine
 import harness
 import issues as issue_store
+import knowledge_edit
 from knowledge import CORE_LIMIT, DELIVERY, LIBRARY, Library
 import pilot_log
 import review
 import transcripts
+import app as voice_app  # the voice agent (named app.py); its defaults are shown on the Settings page
+from private_files import make_private_dir, private_path, restrict  # path set up by transcripts
 
 HOST, PORT = '127.0.0.1', 8102
 ALLOWED_HOSTS = {f'{HOST}:{PORT}', f'localhost:{PORT}'}
@@ -116,6 +119,10 @@ details{background:#fff;border:1px solid var(--line);border-radius:8px;padding:8
 .prose{background:#fff;border:1px solid var(--line);border-radius:8px;padding:8px 26px 18px;line-height:1.55;max-width:960px}
 .prose table{margin:10px 0}.prose code{background:var(--soft);padding:0 4px;border-radius:4px}
 iframe.viewer{width:100%;height:calc(100vh - 150px);border:1px solid var(--line);border-radius:8px;background:#fff}
+textarea.editor{width:100%;font:13px/1.5 Consolas,monospace;padding:10px;border:1px solid var(--line);border-radius:8px;color:var(--ink)}
+.diff{background:#fff;border:1px solid var(--line);border-radius:8px;font:12.5px/1.5 Consolas,monospace;overflow-x:auto;padding:6px 0}
+.diff div{padding:0 12px;white-space:pre-wrap}.diff .add{background:var(--green-soft);color:#1d5e3a}.diff .del{background:var(--red-soft);color:#8c2b2b}
+.diff .hunk{color:var(--violet);background:var(--violet-soft);margin-top:4px}
 .filters label{flex-direction:row;align-items:center;gap:4px}
 .trends{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px;margin:10px 0}
 .trend .big{font-size:22px;font-weight:700;margin:2px 0}.spark{width:100%;height:auto;display:block;margin-top:6px}
@@ -1101,42 +1108,139 @@ async def job_status(job_id: str):
     return JSONResponse({'lines': job['lines'][-400:], 'done': job['done'], 'code': job['code'], 'link': link})
 
 
+SETTINGS_LOG = private_path('settings-log.jsonl')
+# key -> (group, label, what it does, default as shown)
+SETTING_INFO = {
+    'anthropic_model': ('AI model', 'Model', 'Claude model that writes every reply.', 'claude-sonnet-5-5'),
+    'effort': ('AI model', 'Effort', 'How hard the model works on each reply. Higher is slower and costs more.', 'low'),
+    'thinking': ('AI model', 'Thinking', 'between_tools = no thinking before speaking (fastest); adaptive = may think first (slower).',
+                 'between_tools where the model allows it'),
+    'flows': ('Conversation and tickets', 'Ticket flow', 'on = tickets only through the code-enforced ticket flow; off = direct ticket tool.', 'on'),
+    'tickets': ('Conversation and tickets', 'Tickets', 'live = real Zoho Desk tickets; dry_run = saved locally only; off = no tickets.', 'dry_run'),
+    'ticket_subject_prefix': ('Conversation and tickets', 'Ticket subject prefix', 'Added to the start of every ticket subject.', '[TEST] '),
+    'voice': ('Voice and speech', 'Agent voice', 'ElevenLabs voice ID the agent speaks with.', None),
+    'ttsProvider': ('Voice and speech', 'Speech provider', 'Text-to-speech service.', None),
+    'language': ('Voice and speech', 'Language', 'Speech recognition and voice language.', None),
+    'hints': ('Voice and speech', 'Recognition hints', 'Comma-separated words the speech recogniser should expect (names, codes).', None),
+    'say_voice': ('Voice and speech', 'Closing voice', 'Voice for the fixed final words (goodbye, call reference).', None),
+    'echoPromptFiltering': ('Voice and speech', 'Echo filtering', "Ignore the agent's own voice picked up by the caller's microphone.", None),
+    'welcomeGreetingInterruptible': ('Voice and speech', 'Greeting can be interrupted by', 'none = the greeting always plays in full.', None),
+    'interruptSensitivity': ('Voice and speech', 'Interrupt sensitivity', 'How easily caller speech cuts the agent off; high is the easiest.', None),
+    'ignoreBackchannel': ('Voice and speech', 'Ignore "yeah", "uh-huh"', 'Short acknowledgements do not cut the agent off.', None),
+    'transcripts': ('Staff pilot', 'Save transcripts', 'Save calls for the Live call, Calls, Reviews and Issues pages.', 'off'),
+    'call_reference': ('Staff pilot', 'Call reference', 'Speak a 4-digit call reference at the end of each call.', 'on'),
+    'staff_feedback': ('Staff pilot', 'Voice problem reports', 'Let testers say "I want to report a problem" during a call.', 'on'),
+}
+SETTING_GROUPS = ['AI model', 'Conversation and tickets', 'Voice and speech', 'Staff pilot', 'Other']
+
+
+def setting_default(key):
+    info = SETTING_INFO.get(key)
+    if info and info[3] is not None:
+        return info[3]
+    if key == 'say_voice':
+        return voice_app.SAY_VOICE
+    return voice_app.VOICE_DEFAULTS.get(key, '')
+
+
+def setting_risk(key, old, new):
+    """Why a change needs a second click, or None. old/new are effective values ('' = default)."""
+    effective = lambda v: v or setting_default(key)
+    old, new = effective(old), effective(new)
+    if old == new:
+        return None
+    if key == 'tickets' and new == 'live':
+        return 'Calls will create real Zoho Desk tickets that the support team sees and works on.'
+    if key == 'tickets' and new == 'off':
+        return 'The agent will not be able to log tickets at all: callers who need follow-up get none.'
+    if key == 'transcripts' and new == 'off':
+        return 'Calls will stop being saved: Live call, Calls, Reviews, Issues and Trends get no new data.'
+    if key == 'flows' and new == 'off':
+        return 'Tickets will be logged by the model directly, without the code-enforced read-back and confirmation.'
+    if key == 'staff_feedback' and new == 'off':
+        return 'Testers will no longer be able to report problems by voice during calls.'
+    if key == 'effort' and new in ('xhigh', 'max'):
+        return 'Replies will be slower and cost more; callers wait longer for the first word.'
+    if key == 'thinking' and new == 'adaptive':
+        return 'The model may think before speaking: in testing this made the slowest replies about a second slower.'
+    if key == 'anthropic_model':
+        return 'Every call will use a different AI model. Run the tests on it first (Tests page, "thinking" and model settings).'
+    if key == 'voice':
+        return 'Callers will hear a different voice from the next call. Check the voice ID is correct first.'
+    return None
+
+
+def settings_log():
+    if not SETTINGS_LOG.is_file():
+        return []
+    return [json.loads(line) for line in SETTINGS_LOG.read_text(encoding='utf-8').splitlines() if line.strip()]
+
+
+def log_setting(key, old, new):
+    make_private_dir(SETTINGS_LOG.parent)
+    new_file = not SETTINGS_LOG.exists()
+    with SETTINGS_LOG.open('a', encoding='utf-8') as handle:
+        handle.write(json.dumps({'at': datetime.now().isoformat(timespec='seconds'), 'key': key, 'old': old, 'new': new,
+                                 'by': 'dashboard'}, ensure_ascii=False) + '\n')
+    if new_file:
+        restrict(SETTINGS_LOG)
+
+
+def setting_field(key, allowed, current):
+    if allowed:
+        options = [('', f'default ({setting_default(key)})')] + [(o, o) for o in sorted(allowed)]
+        return ('<select name="value">' + ''.join(f'<option value="{e(v)}" {"selected" if v == current else ""}>{e(t)}</option>'
+                                                  for v, t in options) + '</select>')
+    size = 46 if key == 'hints' else 28
+    return f'<input name="value" value="{e(current)}" size="{size}" placeholder="default: {e(setting_default(key))}">'
+
+
 @app.get('/settings')
 async def settings_page(saved: str = ''):
     cfg = read_config()
-    descriptions = {
-        'anthropic_model': 'Claude model for replies', 'effort': 'How hard the model works on each reply',
-        'thinking': 'between_tools = off (fastest); adaptive = may think before replying',
-        'tickets': 'live = real Zoho tickets; dry_run = saved locally; off = no ticket tool',
-        'transcripts': 'Save and show call transcripts (staff pilot only)', 'call_reference': 'Speak a call reference at the end',
-        'staff_feedback': 'Let callers report a problem by voice', 'flows': 'on = tickets only through the ticket flow; off = direct ticket tool', 'say_voice': 'Voice for the fixed final words',
-        'ticket_subject_prefix': 'Added to every ticket subject', 'voice': 'ElevenLabs voice ID for the agent',
-        'ttsProvider': 'Speech provider', 'language': 'Speech language', 'hints': 'Words the speech recogniser should expect'}
-    rows = []
+    log = settings_log()
+    last = {entry['key']: entry for entry in log}
+    groups = {g: [] for g in SETTING_GROUPS}
     for key, allowed in configure.SETTINGS.items():
-        current = cfg.get(key, '')
-        if allowed:
-            field = (f'<select name="value">' + ''.join(f'<option {"selected" if o == current else ""}>{e(o)}</option>' for o in sorted(allowed))
-                     + (f'<option selected value="">(default)</option>' if current == '' else '') + '</select>')
-        else:
-            field = f'<input name="value" value="{e(current)}" size="40" placeholder="(default)">'
-        rows.append(f"""<tr><td><b>{e(key)}</b><div class="muted">{e(descriptions.get(key, ''))}</div></td>
-          <td><form method="post" action="/settings">{token_field()}<input type="hidden" name="key" value="{e(key)}">{field} <button>Save</button></form></td></tr>""")
-    notice = f'<div class="notice">Saved <b>{e(saved)}</b>. It applies from the next call (voice settings) or the next reply (everything else). No restart needed.</div>' if saved else ''
-    body = f"""<h1>Settings</h1><p class="muted">Non-secret settings from the private config. Credentials are never shown here; change them with <code>configure.py</code>.</p>
-    {notice}<table><tr><th style="width:45%">Setting</th><th>Value</th></tr>{''.join(rows)}</table>"""
+        group, label, about, _ = SETTING_INFO.get(key, ('Other', key, '', None))
+        current = str(cfg.get(key, ''))
+        state = ('<span class="pill grey">default</span>' if current == '' else
+                 '<span class="pill info">changed</span>' if current != str(setting_default(key)) else '<span class="pill grey">default value</span>')
+        changed = last.get(key)
+        groups[group].append(f"""<tr id="{e(key)}"><td style="width:42%"><b>{e(label)}</b> {state} {'<span class="pill warn">needs care</span>' if key in ('tickets', 'anthropic_model', 'transcripts', 'flows') else ''}
+          <div class="muted">{e(about)}</div><div class="muted" style="font-size:11.5px"><code>{e(key)}</code> · default {e(setting_default(key)) or '–'}
+          {f" · last changed {when(changed['at'])}" if changed else ''}</div></td>
+          <td><form method="post" action="/settings" class="toolbar" style="margin:0">{token_field()}<input type="hidden" name="key" value="{e(key)}">
+          {setting_field(key, allowed, current)}<button>Save</button></form></td></tr>""")
+    sections = ''.join(f'<h2>{e(g)}</h2><table>{"".join(rows)}</table>' for g, rows in groups.items() if rows)
+    current_values = {k: str(cfg.get(k, '')) for k in configure.SETTINGS}
+    history = ''.join(
+        f"""<tr><td>{when(x['at'])}</td><td>{e(SETTING_INFO.get(x['key'], ('', x['key']))[1])}</td>
+        <td><code>{e(x['old'] or 'default')}</code> → <code>{e(x['new'] or 'default')}</code></td>
+        <td>{f'''<form method="post" action="/settings" class="inline">{token_field()}<input type="hidden" name="key" value="{e(x['key'])}">
+          <input type="hidden" name="value" value="{e(x['old'])}"><button class="ghost">Undo</button></form>'''
+             if current_values.get(x['key']) == x['new'] and n == max(i for i, y in enumerate(log) if y['key'] == x['key']) else ''}</td></tr>"""
+        for n, x in reversed(list(enumerate(log))[-25:]))
+    notice = (f'<div class="notice">Saved <b>{e(SETTING_INFO.get(saved, ("", saved))[1])}</b>. Voice settings apply from the next call; '
+              'everything else from the next reply. No restart needed.</div>' if saved else '')
+    body = f"""<h1>Settings</h1><p class="muted">Non-secret settings from the private config. Credentials are never shown here; change them with
+    <code>configure.py</code>. Changes that affect callers or real tickets ask for confirmation first, and every change is logged below.</p>
+    {notice}{sections}
+    <h2>Change history</h2>{f'<table><tr><th>When</th><th>Setting</th><th>Change</th><th></th></tr>{history}</table>' if history else '<p class="muted">No changes made from the dashboard yet.</p>'}
+    <p class="muted">Changes made with <code>configure.py --set</code> are not listed here.</p>"""
     return page('Settings', body, '/settings')
 
 
 @app.post('/settings')
-async def settings_save(token: str = Form(''), key: str = Form(...), value: str = Form('')):
+async def settings_save(token: str = Form(''), key: str = Form(...), value: str = Form(''), confirm: str = Form('')):
     check_token(token)
     if key not in configure.SETTINGS:
         raise HTTPException(400, 'Unknown setting')
     cfg = read_config()
     if not cfg:
         raise HTTPException(400, 'No private configuration yet: run configure.py first.')
-    if value.strip() == '':
+    old, value = str(cfg.get(key, '')), value.strip()
+    if value == '':
         cfg.pop(key, None)
     else:
         try:
@@ -1149,8 +1253,21 @@ async def settings_save(token: str = Form(''), key: str = Form(...), value: str 
             claude_reply.request_options(cfg)
         except ValueError as error:
             raise HTTPException(400, f'Not saved: {error}')
+    if old == value:
+        return RedirectResponse('/settings', status_code=303)
+    risk = setting_risk(key, old, value)
+    if risk and confirm != 'yes':
+        label = SETTING_INFO.get(key, ('', key))[1]
+        body = f"""<div class="toolbar"><a href="/settings#{e(key)}">← Settings</a></div><h1>Confirm: change {e(label)}?</h1>
+        <div class="card" style="max-width:640px"><p><code>{e(old or f'default ({setting_default(key)})')}</code> →
+        <code>{e(value or f'default ({setting_default(key)})')}</code></p><div class="notice">{e(risk)}</div>
+        <form method="post" action="/settings" class="toolbar">{token_field()}<input type="hidden" name="key" value="{e(key)}">
+        <input type="hidden" name="value" value="{e(value)}"><input type="hidden" name="confirm" value="yes">
+        <button style="background:var(--red)">Yes, change it</button><a class="btn ghost" href="/settings#{e(key)}">Cancel</a></form></div>"""
+        return page('Confirm setting', body, '/settings')
     configure.save_config(cfg)
-    return RedirectResponse(f'/settings?saved={key}', status_code=303)
+    log_setting(key, old, value)
+    return RedirectResponse(f'/settings?saved={key}#{key}', status_code=303)
 
 
 @app.get('/flows')
@@ -1201,7 +1318,7 @@ async def flows_page():
 async def knowledge_page():
     registry = json.loads((LIBRARY / 'registry.json').read_text(encoding='utf-8'))
     try:
-        core = len(Library().system_text())
+        core = len(Library(LIBRARY).system_text())
         status = f'<span class="pill ok">All pilot sources verified</span> core text {core:,} of {CORE_LIMIT:,} characters'
     except Exception as error:
         status = f'<span class="pill bad">Calls would be refused: {e(error)}</span>'
@@ -1210,14 +1327,165 @@ async def knowledge_page():
         path = LIBRARY / item['path']
         ok = path.exists() and hashlib.sha256(path.read_bytes()).hexdigest() == item.get('content_sha256')
         mode = DELIVERY.get(item['id'])
-        rows.append(f"""<tr class="{'' if mode else 'muted'}"><td><b>{e(item['id'])}</b><div class="muted">{e(item.get('name', ''))}</div></td>
+        rows.append(f"""<tr class="{'' if mode else 'muted'}"><td><a href="/knowledge/{e(item['id'])}"><b>{e(item['id'])}</b></a><div class="muted">{e(item.get('name', ''))}</div></td>
           <td>{e(item['version'])}</td><td>{f'<span class="pill info">{e(mode)}</span>' if mode else '<span class="pill grey">not used</span>'}</td>
           <td>{e(item['readiness'])}</td><td>{'<span class="pill ok">matches</span>' if ok else '<span class="pill bad">changed</span>'}</td>
           <td>{path.stat().st_size if path.exists() else 0:,}</td><td class="muted">{e(item.get('description', ''))[:160]}</td></tr>""")
     body = f"""<h1>Knowledge</h1><p>{status}</p><p class="muted">core = in every request · guide = fetched by ID once the screen is identified ·
-    search = searched when needed. To change a document: edit it, update its registry entry (version, fingerprint, review), run the tests, restart.</p>
+    search = searched when needed. Open a source to read it or edit it: the dashboard checks the change, keeps the previous
+    version, updates the registry (version, fingerprint, approval) and the agent uses it from its next reply.</p>
     <table><tr><th>Source</th><th>Version</th><th>Delivery</th><th>Readiness</th><th>Fingerprint</th><th>Bytes</th><th>Use when</th></tr>{''.join(rows)}</table>"""
     return page('Knowledge', body, '/knowledge')
+
+
+def source_id(value):
+    if not re.fullmatch(r'KB-[A-Z0-9-]{1,40}', value or ''):
+        raise HTTPException(404)
+    return value
+
+
+def knowledge_item(value):
+    registry = knowledge_edit.load_registry(LIBRARY)
+    try:
+        return knowledge_edit.entry(registry, source_id(value))
+    except knowledge_edit.EditError:
+        raise HTTPException(404)
+
+
+def related_checks(sid):
+    """Rows of retrieval-checks.csv and scenarios that name this source."""
+    import csv
+    checks = []
+    path = LIBRARY / 'retrieval-checks.csv'
+    if path.is_file():
+        checks = [r for r in csv.DictReader(path.read_text(encoding='utf-8').splitlines()) if sid in r.get('expected_source_or_flow', '')]
+    scenarios = [s for s in json.loads(harness.SCENARIOS.read_text(encoding='utf-8'))['scenarios'] if sid in json.dumps(s)]
+    return checks, scenarios
+
+
+def diff_html(lines):
+    out = []
+    for line in lines[2:]:
+        kind = 'add' if line.startswith('+') else 'del' if line.startswith('-') else 'hunk' if line.startswith('@@') else ''
+        out.append(f'<div class="{kind}">{e(line) or "&nbsp;"}</div>')
+    return f'<div class="diff">{"".join(out)}</div>' if out else '<p class="muted">The document text is unchanged.</p>'
+
+
+@app.get('/knowledge/{value}')
+async def knowledge_source(value: str, saved: str = ''):
+    item = knowledge_item(value)
+    path = knowledge_edit.content_path(LIBRARY, item) if item['path'].endswith('.md') else None
+    text = path.read_text(encoding='utf-8') if path and path.is_file() else ''
+    ok = path is not None and path.is_file() and hashlib.sha256(path.read_bytes()).hexdigest() == item.get('content_sha256')
+    mode = DELIVERY.get(item['id'])
+    checks, scenarios = related_checks(item['id'])
+    history = ''.join(f'<li><b>v{e(h["version"])}</b> {e(h["date"])} · {e(h["approved_by"])}: {e(h["note"])}</li>'
+                      for h in reversed(item.get('change_history', [])))
+    archive = sorted((LIBRARY / 'content' / 'archive').glob(f'{path.stem}-v*.md')) if path else []
+    notice = (f'<div class="notice">Saved as version <b>{e(item["version"])}</b>. The agent uses it from its next reply. '
+              'Run the related tests below, then commit the change (knowledge/ is part of the repository).</div>' if saved else '')
+    tests = ''
+    if scenarios:
+        ids = ','.join(s['id'] for s in scenarios[:12])
+        tests = (f'<form method="post" action="/tests/run" class="inline">{token_field()}<input type="hidden" name="only" value="{e(ids)}">'
+                 f'<button>Run the {min(len(scenarios), 12)} related scenario{"s" if len(scenarios) != 1 else ""}</button></form>')
+    body = f"""<div class="toolbar"><a href="/knowledge">← Knowledge</a><span style="flex:1"></span>
+      {f'<a class="btn" href="/knowledge/{e(item["id"])}/edit">Edit</a>' if path else ''}</div>
+    <h1>{e(item.get('name', item['id']))}</h1>
+    <p class="muted"><code>{e(item['id'])}</code> · version {e(item['version'])} · {f'<span class="pill info">{e(mode)}</span>' if mode else '<span class="pill grey">not used by the agent</span>'}
+      · {e(item['readiness'])} · {'<span class="pill ok">fingerprint matches</span>' if ok else '<span class="pill bad">fingerprint does not match: calls are refused</span>'}</p>
+    {notice}
+    <div class="grid2" style="grid-template-columns:minmax(0,1fr) 340px;align-items:start">
+      <div class="prose">{markdown(text) if text else '<p class="muted">No Markdown content.</p>'}</div>
+      <div><div class="card"><b>{'Routing text (what the agent sees before fetching it)' if mode == 'guide' else 'Description'}</b>
+          <p class="muted">{e(item.get('description', ''))}</p></div>
+        <div class="card" style="margin-top:12px"><b>Review</b><p class="muted" style="margin-bottom:0">Reviewed {e(item.get('reviewed_date', '–'))}<br>{e(item.get('approval', ''))}</p></div>
+        <div class="card" style="margin-top:12px"><b>Tests that cover it</b>
+          {'<ul>' + ''.join(f'<li><code>{e(s["id"])}</code> {e(s["title"])}</li>' for s in scenarios[:12]) + '</ul>' if scenarios else '<p class="muted">No scenario names this source.</p>'}
+          {'<p class="muted">Knowledge checks: ' + ', '.join(e(c['check_id']) for c in checks) + '</p>' if checks else ''}{tests}</div>
+        <div class="card" style="margin-top:12px"><b>History</b>{f'<ul>{history}</ul>' if history else '<p class="muted">No dashboard edits yet.</p>'}
+          {('<p class="muted">Earlier versions kept in content/archive: ' + ', '.join(e(p.name) for p in archive) + '</p>') if archive else ''}</div></div></div>"""
+    return page(item['id'], body, '/knowledge')
+
+
+def edit_form(item, text, description, role='', note='', error=''):
+    mode = DELIVERY.get(item['id'])
+    limit = CORE_LIMIT if mode == 'core' else knowledge_edit.GUIDE_LIMIT if mode == 'guide' else None
+    return f"""<div class="toolbar"><a href="/knowledge/{e(item['id'])}">← {e(item['id'])}</a></div>
+    <h1>Edit {e(item.get('name', item['id']))}</h1>
+    <p class="muted">Version {e(item['version'])} → {e(knowledge_edit.bump(item['version']))} · delivery {e(mode or 'not used')}
+    {f' · limit {limit:,} characters' + (' for all core text together' if mode == 'core' else '') if limit else ''}.
+    Only write what reviewed sources support; prices, eligibility and terms need business approval.</p>
+    {f'<div class="notice" style="background:var(--red-soft);border-color:#e8b4b4">{e(error)}</div>' if error else ''}
+    <form method="post" action="/knowledge/{e(item['id'])}/preview" style="display:grid;gap:10px">{token_field()}
+      <input type="hidden" name="version" value="{e(item['version'])}">
+      <label>Document (Markdown) <textarea name="text" rows="26" spellcheck="true" class="editor">{e(text)}</textarea></label>
+      <label>{'Routing text: when the agent should fetch this guide' if mode == 'guide' else 'Description'}
+        <textarea name="description" rows="2" class="editor" style="font-family:inherit">{e(description)}</textarea></label>
+      <div class="grid2"><label>Approved by (role, not a name) <input name="role" value="{e(role)}" placeholder="e.g. Product owner" required></label>
+      <label>What changed and why <input name="note" value="{e(note)}" placeholder="e.g. Corrected the 3-day price after the November price list" required></label></div>
+      <div class="toolbar"><button>Preview and check</button><a class="btn ghost" href="/knowledge/{e(item['id'])}">Cancel</a></div></form>"""
+
+
+@app.get('/knowledge/{value}/edit')
+async def knowledge_edit_page(value: str):
+    item = knowledge_item(value)
+    path = knowledge_edit.content_path(LIBRARY, item)
+    return page(f'Edit {item["id"]}', edit_form(item, path.read_text(encoding='utf-8'), item.get('description', '')), '/knowledge')
+
+
+@app.post('/knowledge/{value}/preview')
+async def knowledge_preview(value: str, token: str = Form(''), version: str = Form(''), text: str = Form(''),
+                            description: str = Form(''), role: str = Form(''), note: str = Form('')):
+    check_token(token)
+    item = knowledge_item(value)
+    try:
+        if version != item['version']:
+            raise knowledge_edit.EditError('This document was changed since you opened it; your text is kept below, compare it with the new version.')
+        change = knowledge_edit.plan(item['id'], text, description, role, note, LIBRARY)
+    except knowledge_edit.EditError as error:
+        return page(f'Edit {item["id"]}', edit_form(item, text, description, role, note, str(error)), '/knowledge')
+    size = ''
+    if change['knowledge_after'] is not None:
+        size = (f'<p>Knowledge sent with every request: {change["knowledge_before"]:,} → {change["knowledge_after"]:,} characters'
+                f' (limit {CORE_LIMIT:,} for core text).</p>' if change['mode'] == 'core' else
+                f'<p>Guide length: {len(change["new_text"]):,} of {knowledge_edit.GUIDE_LIMIT:,} characters.</p>' if change['mode'] == 'guide' else '')
+    described = (f'<div class="card"><b>Description changes</b><div class="diff"><div class="del">- {e(change["old_description"])}</div>'
+                 f'<div class="add">+ {e(change["description"])}</div></div></div>' if change['description_changed'] else '')
+    body = f"""<div class="toolbar"><a href="/knowledge/{e(item['id'])}">← {e(item['id'])}</a></div>
+    <h1>Check the change to {e(item['id'])}</h1>
+    <div class="notice" style="background:var(--green-soft);border-color:#b9dcc6">✓ Checked on a copy of the library exactly as the agent loads it:
+      fingerprints, readiness and size limits pass. {'Saving puts it live from the agent’s next reply.' if change['mode'] else 'This source is not used by the agent.'}</div>
+    {size}<p class="muted">Version {e(change['old_version'])} → <b>{e(change['version'])}</b> · approved by {e(role)} · “{e(note)}”.
+    The current text is kept as <code>content/archive/{e(change['archive'].name)}</code>.</p>
+    {described}<h2>Document changes</h2>{diff_html(change['diff'])}
+    <details><summary>Preview the edited document</summary><div class="prose">{markdown(change['new_text'])}</div></details>
+    <form method="post" action="/knowledge/{e(item['id'])}/save" class="toolbar" style="margin-top:14px">{token_field()}
+      <input type="hidden" name="version" value="{e(item['version'])}"><textarea name="text" hidden>{e(text)}</textarea>
+      <textarea name="description" hidden>{e(description)}</textarea><input type="hidden" name="role" value="{e(role)}">
+      <input type="hidden" name="note" value="{e(note)}"><button>Save version {e(change['version'])}</button>
+      <button formaction="/knowledge/{e(item['id'])}/back" class="ghost">Back to editing</button></form>"""
+    return page(f'Check {item["id"]}', body, '/knowledge')
+
+
+@app.post('/knowledge/{value}/back')
+async def knowledge_back(value: str, token: str = Form(''), text: str = Form(''), description: str = Form(''),
+                         role: str = Form(''), note: str = Form('')):
+    check_token(token)
+    item = knowledge_item(value)
+    return page(f'Edit {item["id"]}', edit_form(item, text, description, role, note), '/knowledge')
+
+
+@app.post('/knowledge/{value}/save')
+async def knowledge_save(value: str, token: str = Form(''), version: str = Form(''), text: str = Form(''),
+                         description: str = Form(''), role: str = Form(''), note: str = Form('')):
+    check_token(token)
+    item = knowledge_item(value)
+    try:
+        knowledge_edit.save(item['id'], text, description, role, note, LIBRARY, expected_version=version)
+    except knowledge_edit.EditError as error:
+        return page(f'Edit {item["id"]}', edit_form(item, text, description, role, note, str(error)), '/knowledge')
+    return RedirectResponse(f'/knowledge/{item["id"]}?saved=1', status_code=303)
 
 
 # ------------------------------------------------------------------ issues

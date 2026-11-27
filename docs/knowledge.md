@@ -14,6 +14,23 @@ Each document in `knowledge/registry.json` that the agent may use has a delivery
 Documents not listed in `DELIVERY` are never loaded. KB-STAFF-CONTACTS stays excluded until
 staff and patient routing are separated.
 
+## Changing an existing document in the dashboard
+
+Knowledge → open the source → **Edit**. Change the text (and, for a guide, the routing text the
+agent sees before fetching it), say who approved it by role and what changed, then **Preview and
+check**. The dashboard applies the change to a scratch copy of the library and loads it exactly
+as the agent does (fingerprints, readiness, size limits), and shows the differences. **Save**
+then:
+
+- keeps the current text as `knowledge/content/archive/<file>-v<old version>.md`
+- writes the new text (LF line endings) and updates the registry entry: version bumped,
+  `content_sha256`, `reviewed_date`, `approval` and a `change_history` line
+- refuses to save over a newer edit made since the editor was opened
+
+The running agent re-reads the library when files change, so the edit is used from its next
+reply. Then run the related scenarios (listed on the source page) and commit `knowledge/`.
+New documents, delivery modes and readiness changes still follow the steps below.
+
 ## Adding or changing a document
 
 1. **Prepare the content.** Turn the original material (manual, guidance, photos) into a clear
