@@ -103,15 +103,25 @@ the call used. Calls with a failed rule or a spoken report are listed first in
 above in one place: calls needing attention, transcripts, reports, reviews and test runs, with
 buttons to review, run tests and turn a call into a scenario.
 
+**Issues:** the dashboard's Issues page keeps one list of problems. Every review finding and
+spoken report becomes a *new* issue automatically; reports posted in Teams are added by hand.
+The list is kept in `private-config/issues.json` because it quotes calls. Each issue moves
+new → open → fixed (or dismissed), with a history of every change.
+
 **Triage cycle (weekly, or after each batch of reports):**
-1. Run `review.py` and read the report, plus Teams reports from testers.
-2. For each real problem, confirm it in the transcript and classify it: knowledge gap, rule or
-   prompt, tool or code, speech recognition, voice, or caller expectation.
-3. `harness.py --from-transcript <reference>` adds a draft scenario that replays the caller's
-   lines. Edit its expectations so it fails for the reported problem.
-4. Fix (knowledge, prompt, code or settings), run the offline tests and the harness, restart.
-5. Record it in [issue-register.csv](issue-register.csv) (call reference and role only, no
-   names) and tell the tester it is fixed.
+1. Review new calls (dashboard or `review.py`); add Teams reports on the Issues page.
+2. For each new issue, read the call and either dismiss it (not a problem, duplicate) or set it
+   to open and classify it: knowledge gap, rule or prompt, tool or code, speech recognition,
+   voice, speed, or caller expectation. "Recurring themes" groups the same finding across calls
+   so they can be updated together.
+3. Link a test scenario that reproduces it: "Make a scenario from this call" adds a draft
+   (the same as `harness.py --from-transcript <reference>`). Edit its expectations so it fails
+   for the problem.
+4. Fix (knowledge, prompt, code or settings), run the offline tests, restart, and set the issue
+   to fixed (the running code version is recorded).
+5. Run the scenario from the issue page. A pass in a run after the fix marks it *verified*.
+   Tell the tester it is fixed. "Export CSV" gives the list for sharing (call references only;
+   check it holds no names before sending).
 
 Speech recognition, voice quality and barge-in timing can only be judged on real calls. Keep a
 short list of phrases that were misheard and add them to `hints` (`configure.py --set hints=...`).

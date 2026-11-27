@@ -25,6 +25,7 @@ from datetime import datetime
 import json
 from pathlib import Path
 import re
+import statistics
 import sys
 
 import anthropic
@@ -369,6 +370,69 @@ def scenario_from_call(reference):
             'tags': ['from-call', 'draft'], 'caller': {'script': script}, 'expect': {}, 'judge': judge}
 
 
+RANK = {'fail': 0, 'mixed': 1, 'pass': 2}
+COMPARED_SETTINGS = ['model', 'effort', 'thinking', 'judge_model']
+COMPARED_VERSION = ['code', 'prompt', 'knowledge']
+
+
+def _scenario_summary(results):
+    """All repeats of one scenario in one run: pass/fail/mixed, reasons, timing and cost."""
+    passed = sum(r['passed'] for r in results)
+    reasons = []
+    for r in results:
+        for c in r['checks']:
+            if not c['passed']:
+                reasons.append(c['check'] + (f": {c['detail']}" if c.get('detail') else ''))
+        for v in r['verdicts']:
+            if not v['passed']:
+                reasons.append(f"judge: {v['criterion']} ({v['reason']})")
+    firsts = [t['first_word_ms'] for r in results for t in r['run']['turns'] if t.get('first_word_ms') is not None]
+    return {'state': 'pass' if passed == len(results) else 'fail' if passed == 0 else 'mixed',
+            'passed': passed, 'runs': len(results), 'reasons': list(dict.fromkeys(reasons)),
+            'first_ms': statistics.median(firsts) if firsts else None, 'cost': sum(r['cost'] for r in results) / len(results)}
+
+
+def _run_totals(data):
+    firsts = [t['first_word_ms'] for r in data['results'] for t in r['run']['turns'] if t.get('first_word_ms') is not None]
+    return {'passed': sum(r['passed'] for r in data['results']), 'total': len(data['results']), 'cost': data['cost'],
+            'first_ms': statistics.median(firsts) if firsts else None, 'skipped': data.get('skipped', [])}
+
+
+def compare_runs(a, b):
+    """Compare two results.json documents (a = before, b = after), scenario by scenario."""
+    by_id = {}
+    for side, data in (('a', a), ('b', b)):
+        for r in data['results']:
+            entry = by_id.setdefault(r['id'], {'id': r['id'], 'title': r['title'], 'a': [], 'b': []})
+            entry[side].append(r)
+    rows = []
+    for entry in by_id.values():
+        sa = _scenario_summary(entry['a']) if entry['a'] else None
+        sb = _scenario_summary(entry['b']) if entry['b'] else None
+        if sa is None or sb is None:
+            change = 'only before' if sb is None else 'only after'
+        elif RANK[sb['state']] > RANK[sa['state']]:
+            change = 'fixed'
+        elif RANK[sb['state']] < RANK[sa['state']]:
+            change = 'broke'
+        else:
+            change = 'still failing' if sb['state'] != 'pass' else 'still passing'
+        rows.append({'id': entry['id'], 'title': entry['title'], 'a': sa, 'b': sb, 'change': change})
+    order = ['broke', 'fixed', 'still failing', 'only after', 'only before', 'still passing']
+    rows.sort(key=lambda r: (order.index(r['change']), r['id']))
+    sa, sb = a['settings'], b['settings']
+    changed = [(k, sa.get(k), sb.get(k)) for k in COMPARED_SETTINGS if sa.get(k) != sb.get(k)]
+    va, vb = sa.get('version') or {}, sb.get('version') or {}
+    if va and vb:
+        changed += [(k, va.get(k), vb.get(k)) for k in COMPARED_VERSION if va.get(k) != vb.get(k)]
+    counts = {name: sum(r['change'] == name for r in rows) for name in order}
+    both = [r for r in rows if r['a'] and r['b']]
+    shared = {'count': len(both), 'a': sum(r['a']['state'] == 'pass' for r in both),
+              'b': sum(r['b']['state'] == 'pass' for r in both)}
+    return {'rows': rows, 'counts': counts, 'shared': shared, 'changed': changed, 'versions_known': bool(va and vb),
+            'a': _run_totals(a), 'b': _run_totals(b)}
+
+
 def add_scenario(scenario):
     data = json.loads(SCENARIOS.read_text(encoding='utf-8'))
     if any(s['id'] == scenario['id'] for s in data['scenarios']):
@@ -422,7 +486,9 @@ async def main_async(args):
     meter = Meter(args.budget)
     settings = {'started': started.strftime('%Y-%m-%d %H:%M'), 'model': cfg.get('anthropic_model'),
                 'effort': cfg.get('effort'), 'thinking': cfg.get('thinking'), 'judge_model': args.judge_model,
-                'budget': args.budget}
+                'budget': args.budget,
+                # code commit and prompt/knowledge fingerprints, so two runs can be compared fairly
+                'version': pilot_log.version_stamp(cfg, app.system_prompt(cfg), app.knowledge())}
     results, skipped = [], []
     queue = [(s, n + 1) for s in scenarios for n in range(args.repeat)]
     async with anthropic.AsyncAnthropic(api_key=cfg['anthropic_api_key'], max_retries=1, timeout=60) as client:

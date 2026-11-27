@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 import configure
 import dashboard
 import harness
+import issues
 import pilot_log
 from private_files import is_private
 import review
@@ -34,6 +35,7 @@ class DashboardTests(unittest.TestCase):
                         patch.object(review, 'FOLDER', root / 'reviews'), patch.object(review, 'STATE', root / 'reviews' / 'reviewed.json'),
                         patch.object(harness, 'RUNS', root / 'runs'), patch.object(harness, 'SCENARIOS', scenarios),
                         patch.object(pilot_log, 'FEEDBACK_LOG', root / 'feedback.jsonl'),
+                        patch.object(issues, 'STORE', root / 'issues.json'),
                         patch.object(dashboard, 'PILOT_HEALTH', 'http://127.0.0.1:9/health')]
         for p in self.patches:
             p.start(); self.addCleanup(p.stop)
@@ -124,7 +126,7 @@ class DashboardTests(unittest.TestCase):
     def test_every_page_renders_and_never_shows_secrets(self):
         path = self.make_call()
         for url in ['/', '/calls', '/calls?show=attention', f'/calls/{path.stem}', '/reports', '/reviews', '/tests',
-                    '/flows', '/settings', '/knowledge', '/live', '/live/feed', '/docs', '/docs/scenarios',
+                    '/flows', '/settings', '/knowledge', '/live', '/issues', '/issues?status=all', '/live/feed', '/docs', '/docs/scenarios',
                     '/docs/view/testing.md', '/docs/view/issue-register.csv', '/docs/view/technical-reference.pdf']:
             response = self.client.get(url)
             self.assertEqual(response.status_code, 200, url)
@@ -175,6 +177,114 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(command[command.index('--repeat') + 1], '3')
         self.assertIn('--tag', command); self.assertIn('thinking=between_tools', command)
         self.assertEqual(bad.status_code, 400)
+
+    def review_finding(self, path, *texts):
+        review._save_state({path.name: {'at': '2026-11-27T10:00:00', 'reference': '4721', 'flagged': True,
+                                        'issues': list(texts), 'reviewed': '2026-11-27T10:05:00'}})
+
+    def test_issues_flow_from_review_to_verified(self):
+        path = self.make_call()
+        self.review_finding(path, 'Asks one clear question at a time: asked two questions in one turn')
+        with patch('sys.stderr', io.StringIO()):
+            t = transcripts.CallTranscript('CA' + '6' * 32, True, details={'reference': '9001'})
+            t.event('closed', {'reason': 'goodbye'})
+        review._save_state({**review._load_state(), t.path.name: {'reference': '9001', 'issues': [
+            'Asks one clear question at a time: again two questions'], 'reviewed': '2026-11-27T10:06:00'}})
+        listing = self.client.get('/issues').text  # syncs: one issue per review finding
+        self.assertIn('ISS-001', listing); self.assertIn('ISS-002', listing); self.assertIn('Recurring themes', listing)
+        self.assertIn('<span class="count"', listing)  # new-issue badge in the sidebar
+        self.assertIn('ISS-001', self.client.get(dashboard.call_url(path.name)).text)
+        self.client.get('/issues')  # a second sync adds nothing
+        self.assertEqual(len(issues.load()['issues']), 2)
+
+        self.assertEqual(self.client.post('/issues/ISS-001', data={'status': 'open'}).status_code, 403)
+        made = self.client.post('/issues/ISS-001/scenario', data={'token': dashboard.TOKEN}, follow_redirects=False)
+        self.assertEqual(made.status_code, 303)
+        issue = issues.get(issues.load(), 'ISS-001')
+        self.assertEqual(issue['scenario'], 'CALL-4721')
+        scenario = json.loads(harness.SCENARIOS.read_text(encoding='utf-8'))['scenarios'][-1]
+        self.assertIn('Does not repeat this problem: Asks one clear question at a time', scenario['judge'])
+
+        self.client.post('/issues/ISS-001', data={'token': dashboard.TOKEN, 'status': 'fixed', 'category': 'rule or prompt',
+                                                  'scenario': 'CALL-4721', 'note': 'tightened the rule'})
+        issue = issues.get(issues.load(), 'ISS-001')
+        self.assertEqual((issue['status'], issue['category']), ('fixed', 'rule or prompt'))
+        self.assertTrue(issue['fixed_in']); self.assertIn('note: tightened the rule', issue['history'][-1]['change'])
+        self.assertEqual(issues.verification(issue, {})['state'], 'not run')
+        later = (issue['fixed_at'][:10] + ' 23:59')
+        self.assertEqual(issues.verification(issue, {'CALL-4721': [(True, later)]})['state'], 'verified')
+        self.assertEqual(issues.verification(issue, {'CALL-4721': [(False, later)]})['state'], 'failing')
+        self.assertEqual(issues.verification(issue, {'CALL-4721': [(True, '2000-01-01 00:00')]})['state'], 'waiting')
+
+        bulk = self.client.post('/issues/bulk', data={'token': dashboard.TOKEN, 'ids': ['ISS-002'], 'status': 'dismissed',
+                                                      'note': 'duplicate of ISS-001'}, follow_redirects=False)
+        self.assertEqual(bulk.status_code, 303)
+        self.assertEqual(issues.get(issues.load(), 'ISS-002')['status'], 'dismissed')
+        self.assertEqual(self.client.post('/issues/bulk', data={'token': dashboard.TOKEN, 'ids': ['ISS-999'],
+                                                                'status': 'open'}).status_code, 404)
+        self.assertEqual(self.client.post('/issues/ISS-001', data={'token': dashboard.TOKEN, 'scenario': 'NOPE'}).status_code, 400)
+
+    def test_manual_issues_reports_and_export(self):
+        path = self.make_call()
+        pilot_log.FEEDBACK_LOG.write_text(json.dumps({'at': '2026-11-27T11:00:00', 'reference': '4721', 'caller': '019',
+                                                      'call': '888888', 'description': 'It talked over me'}) + '\n', encoding='utf-8')
+        added = self.client.post('/issues/new', data={'token': dashboard.TOKEN, 'title': 'Voice too fast <b>',
+                                                      'reference': '4721', 'category': 'voice'}, follow_redirects=False)
+        self.assertEqual(added.status_code, 303)
+        listing = self.client.get('/issues').text
+        self.assertIn('Voice too fast &lt;b&gt;', listing); self.assertIn('It talked over me', listing)
+        found = {i['source']: i for i in issues.load()['issues']}
+        self.assertEqual(found['report']['call_file'], path.name); self.assertEqual(found['manual']['call_file'], path.name)
+        self.assertIn('Show the conversation', self.client.get(f"/issues/{found['report']['id']}").text)
+        for bad in [{'title': ''}, {'title': 'x', 'reference': '12'}, {'title': 'x', 'category': 'nonsense'}]:
+            self.assertEqual(self.client.post('/issues/new', data={'token': dashboard.TOKEN, **bad}).status_code, 400, bad)
+        csv_text = self.client.get('/issues.csv')
+        self.assertTrue(csv_text.headers['content-disposition'].startswith('attachment'))
+        self.assertIn('Voice too fast <b>', csv_text.text)
+        self.assertTrue(is_private(issues.STORE))
+        for url in ['/issues/ISS-999', '/issues/..%2Fx', '/issues/nothing']:
+            self.assertEqual(self.client.get(url).status_code, 404, url)
+
+    def write_run(self, name, outcomes, version=None, cost=0.10, first=1500, skipped=()):
+        """outcomes: scenario id -> list of passed flags (one per repeat)."""
+        results = []
+        for sid, flags in outcomes.items():
+            for n, ok in enumerate(flags, 1):
+                results.append({'id': sid, 'title': f'Title {sid}', 'repeat': n, 'passed': ok, 'cost': 0.01,
+                                'checks': [{'check': 'said_none', 'passed': ok, 'detail': '' if ok else 'said "bed number"'}],
+                                'verdicts': [], 'run': {'transcript': [], 'tools': [], 'finish': None, 'error': None, 'turns': [{'first_word_ms': first, 'total_ms': first + 500}]}})
+        settings = {'started': f'{name[:4]}-{name[4:6]}-{name[6:8]} {name[9:11]}:{name[11:13]}', 'model': 'claude-sonnet-5-5',
+                    'effort': 'low', 'thinking': None, 'judge_model': 'claude-haiku-5-5', 'budget': 0.5}
+        if version:
+            settings['version'] = version
+        folder = harness.RUNS / name; folder.mkdir()
+        (folder / 'results.json').write_text(json.dumps({'settings': settings, 'cost': cost, 'usage': {}, 'skipped': list(skipped),
+                                                         'results': results}), encoding='utf-8')
+
+    def test_compare_runs(self):
+        v1 = {'code': 'aaa1111', 'prompt': 'p1', 'knowledge': 'k1'}
+        self.write_run('20261127-090000', {'A-1': [True], 'B-1': [False], 'C-1': [True], 'D-1': [False], 'E-1': [True]}, v1)
+        self.write_run('20261127-100000', {'A-1': [True], 'B-1': [True], 'C-1': [False], 'D-1': [False, True], 'F-1': [True]},
+                       {**v1, 'prompt': 'p2'}, cost=0.08, first=1200)
+        c = harness.compare_runs(*(json.loads((harness.RUNS / n / 'results.json').read_text(encoding='utf-8'))
+                                   for n in ('20261127-090000', '20261127-100000')))
+        changes = {r['id']: r['change'] for r in c['rows']}
+        self.assertEqual(changes, {'A-1': 'still passing', 'B-1': 'fixed', 'C-1': 'broke', 'D-1': 'fixed',
+                                   'E-1': 'only before', 'F-1': 'only after'})
+        self.assertEqual(c['rows'][0]['id'], 'C-1')  # regressions first
+        self.assertEqual(c['changed'], [('prompt', 'p1', 'p2')])
+        self.assertEqual(c['shared'], {'count': 4, 'a': 2, 'b': 2})  # A,B,C,D: A+C pass before; A+B after (D mixed)
+        self.assertEqual(next(r for r in c['rows'] if r['id'] == 'D-1')['b']['state'], 'mixed')
+
+        page_text = self.client.get('/tests/compare').text  # defaults: previous run vs newest
+        self.assertIn('▼ broke', page_text); self.assertIn('▲ fixed', page_text)
+        self.assertIn('<code>p1</code> → <code>p2</code>', page_text)
+        self.assertIn('did not cover the same scenarios', page_text)
+        self.assertIn('name="only" value="C-1"', page_text)  # re-run button covers what still fails
+        self.assertIn('/tests/compare?a=20261127-090000&b=20261127-100000', self.client.get('/tests/20261127-100000').text)
+        self.assertIn('name="a"', self.client.get('/tests').text)
+        self.assertEqual(self.client.get('/tests/compare?a=20261127-090000&b=20261127-090000').status_code, 400)
+        self.assertEqual(self.client.get('/tests/compare?a=..%2F..&b=20261127-090000').status_code, 404)
 
     def test_markdown_renderer_escapes(self):
         html = dashboard.markdown('# Title\n- item <script>\n```\ncode <x>\n```\n**bold**')

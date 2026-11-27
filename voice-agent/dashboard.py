@@ -18,6 +18,7 @@ import re
 import secrets
 import statistics
 import sys
+from urllib.parse import quote
 from urllib.request import urlopen
 import webbrowser
 
@@ -27,6 +28,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTex
 import configure
 import flows as flow_engine
 import harness
+import issues as issue_store
 from knowledge import CORE_LIMIT, DELIVERY, LIBRARY, Library
 import pilot_log
 import review
@@ -69,6 +71,8 @@ aside a{display:flex;align-items:center;gap:8px;color:#dbe4f4;text-decoration:no
 aside a:hover{background:#ffffff12;color:#fff}aside a.on{background:#ffffff1c;color:#fff;border-left-color:#5fd0d2}
 aside .dot{width:8px;height:8px;border-radius:50%;background:#e5484d;box-shadow:0 0 0 3px #e5484d44;animation:pulse 1.4s infinite}
 @keyframes pulse{50%{opacity:.35}}
+aside .count{margin-left:auto;background:#5fd0d2;color:var(--navy);border-radius:9px;padding:0 7px;font-size:11px;font-weight:700}
+label{display:flex;flex-direction:column;gap:3px;font-size:12px;color:var(--muted);font-weight:600}
 main{padding:24px 32px;max-width:1240px;width:100%}
 h1{font-size:22px;margin:0 0 4px}h2{font-size:16px;margin:22px 0 8px}.muted{color:var(--muted)}
 .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px;margin:14px 0}
@@ -116,15 +120,21 @@ iframe.viewer{width:100%;height:calc(100vh - 150px);border:1px solid var(--line)
 """
 
 NAV = [('Monitor', [('/', 'Overview'), ('/live', 'Live call'), ('/calls', 'Calls'), ('/reports', 'Reports'), ('/reviews', 'Reviews')]),
-       ('Improve', [('/tests', 'Tests'), ('/flows', 'Flows'), ('/knowledge', 'Knowledge')]),
+       ('Improve', [('/issues', 'Issues'), ('/tests', 'Tests'), ('/flows', 'Flows'), ('/knowledge', 'Knowledge')]),
        ('Reference', [('/docs', 'Documentation')]),
        ('Configure', [('/settings', 'Settings')])]
 
 
 def page(title, body, active='/'):
-    dot = ' <span class="dot" title="Call in progress"></span>' if active_call() is not None else ''
+    badges = {'/live': ' <span class="dot" title="Call in progress"></span>' if active_call() is not None else ''}
+    try:
+        waiting = sum(i['status'] == 'new' for i in issue_store.load()['issues'])
+    except (OSError, ValueError):
+        waiting = 0
+    if waiting:
+        badges['/issues'] = f' <span class="count" title="New issues to triage">{waiting}</span>'
     nav = ''.join(f'<div class="group">{group}</div>' + ''.join(
-        f'<a href="{href}" class="{"on" if href == active else ""}">{name}{dot if href == "/live" else ""}</a>'
+        f'<a href="{href}" class="{"on" if href == active else ""}">{name}{badges.get(href, "")}</a>'
         for href, name in items) for group, items in NAV)
     return HTMLResponse(f'<!doctype html><html lang="en-AU"><head><meta charset="utf-8"><title>{escape(title)} · LSPcare voice agent</title>'
                         f'<meta name="viewport" content="width=device-width,initial-scale=1"><style>{CSS}</style></head><body>'
@@ -451,7 +461,10 @@ async def overview():
     reports = pilot_log.read_reports()
     runs = harness_runs()
     unreviewed = sum(1 for r in rows if r['review'] is None and r['turns'])
-    issues = sum(1 for r in rows if r['review'] and r['review']['issues'])
+    issue_store.sync()
+    tracked = issue_store.load()['issues']
+    new_issues = sum(i['status'] == 'new' for i in tracked)
+    open_issues = sum(i['status'] == 'open' for i in tracked)
     options = None
     try:
         import claude_reply
@@ -469,14 +482,16 @@ async def overview():
     <div class="cards">
       <div class="card"><div class="big">{sum(1 for r in rows if r['at'].startswith(today))}</div><div class="lbl">calls today · {len(rows)} saved</div></div>
       <div class="card"><div class="big" style="color:var(--red)">{len(reports)}</div><div class="lbl">problems reported by voice</div></div>
-      <div class="card"><div class="big" style="color:var(--amber)">{issues}</div><div class="lbl">calls with review issues</div></div>
+      <a class="card" href="/issues" style="text-decoration:none;color:inherit"><div class="big" style="color:var(--amber)">{new_issues}</div>
+        <div class="lbl">new issues to triage · {open_issues} open</div></a>
       <div class="card"><div class="big">{unreviewed}</div><div class="lbl">calls not yet reviewed</div></div>
       <div class="card"><div class="big">{f'{last["passed"]}/{last["total"]}' if last else '–'}</div><div class="lbl">last test run{f' · {last["name"][:8]}' if last else ''}</div></div>
     </div>
     <div class="grid2"><div class="card"><b>Agent</b><p class="muted">{model}<br>voice {e(cfg.get('voice'))} · transcripts {e(cfg.get('transcripts', 'off'))}
       · call reference {e(cfg.get('call_reference', 'on'))} · staff reports {e(cfg.get('staff_feedback', 'on'))}</p><a href="/settings">Change settings</a></div>
-    <div class="card"><b>Next steps</b><p class="muted">{'Review the new calls. ' if unreviewed else ''}{'Look at the reported problems. ' if reports else ''}
-      Turn confirmed problems into tests from the call page, fix them, then run the tests.</p>
+    <div class="card"><b>Next steps</b><p class="muted">{'Review the new calls. ' if unreviewed else ''}{f'Triage the {new_issues} new issues. ' if new_issues else ''}
+      Confirm each real problem, link a test scenario, fix it, then run the tests to verify.</p>
+      <a class="btn" style="background:var(--amber)" href="/issues">Triage issues</a>
       <form class="inline" method="post" action="/reviews/run">{token_field()}<button>Review new calls</button></form>
       <a class="btn" style="background:var(--navy)" href="/tests">Run tests</a></div></div>
     <h2>Latest calls</h2>{calls_table(rows[:8])}"""
@@ -540,6 +555,12 @@ async def call_detail(name: str, made: str = ''):
     made_html = f'<div class="notice">Added scenario <b>{e(made)}</b> to scenarios.json (tagged draft). Edit its expectations, then run it from Tests.</div>' if made else ''
     url = call_url(path.name)
     live = active_call() == path
+    issue_store.sync()
+    linked = [i for i in issue_store.load()['issues'] if i.get('call_file') == path.name]
+    if linked:
+        review_html += ('<p style="margin-bottom:4px"><b>Tracked issues</b></p><ul style="margin-top:0;padding-left:18px">'
+                        + ''.join(f'<li><a href="/issues/{e(i["id"])}">{e(i["id"])}</a> {status_pill(i["status"])} {e(i["title"])}</li>'
+                                  for i in linked) + '</ul>')
     version = (f'{e(v.get("code"))} · {e(v.get("model"))} · effort {e(v.get("effort"))} · thinking {e(v.get("thinking"))} · '
                f'prompt {e(v.get("prompt"))} · knowledge {e(v.get("knowledge"))}' if v else 'recorded before version stamps were added')
     body = f"""<div class="toolbar"><a href="/calls">← All calls</a><span style="flex:1"></span>
@@ -625,10 +646,14 @@ async def tests_page():
     runs = harness_runs()
     scenarios = json.loads(harness.SCENARIOS.read_text(encoding='utf-8'))['scenarios']
     tags = sorted({t for s in scenarios for t in s.get('tags', [])})
-    rows = ''.join(f"""<tr><td><a href="/tests/{e(r['name'])}">{e(r['data']['settings'].get('started'))}</a></td>
+    rows = ''.join(f"""<tr><td><input type="radio" name="a" value="{e(r['name'])}" {'checked' if n == 1 else ''} title="Before"></td>
+        <td><input type="radio" name="b" value="{e(r['name'])}" {'checked' if n == 0 else ''} title="After"></td>
+        <td><a href="/tests/{e(r['name'])}">{e(r['data']['settings'].get('started'))}</a></td>
         <td><span class="pill {'ok' if r['passed'] == r['total'] and not r['data'].get('skipped') else 'warn'}">{r['passed']}/{r['total']}</span></td>
         <td>US${r['data']['cost']:.3f}</td><td>{f"{r['median'] / 1000:.1f} s" if r['median'] else '–'}</td>
-        <td class="muted">{e(r['data']['settings'].get('model'))} · thinking {e(r['data']['settings'].get('thinking') or 'default')}</td></tr>""" for r in runs)
+        <td class="muted">{e(r['data']['settings'].get('model'))} · thinking {e(r['data']['settings'].get('thinking') or 'default')}
+        {f" · code {e((r['data']['settings'].get('version') or {}).get('code'))}" if r['data']['settings'].get('version') else ''}</td></tr>"""
+                   for n, r in enumerate(runs))
     body = f"""<h1>Tests</h1><p class="muted">The conversation harness runs scenarios through the same engine as the phone. Tickets are always dry-run.</p>
     <div class="card"><b>Run tests</b><form method="post" action="/tests/run" style="margin-top:8px">{token_field()}
       <select name="selection"><option value="all">All {len(scenarios)} scenarios</option>
@@ -638,10 +663,109 @@ async def tests_page():
       thinking <select name="thinking"><option value="">current setting</option><option value="between_tools">off</option><option value="adaptive">adaptive</option></select>
       budget US$ <select name="budget"><option>0.25</option><option selected>0.50</option><option>1.00</option></select>
       <button>Start</button></form></div>
-    <h2>Past runs</h2>{f'<table><tr><th>Run</th><th>Passed</th><th>Cost</th><th>First word (median)</th><th>Settings</th></tr>{rows}</table>' if runs else '<p class="muted">No runs yet.</p>'}
+    <h2>Past runs</h2>{f'''<form method="get" action="/tests/compare"><div class="toolbar"><span class="muted">Pick a run before and after a change:</span>
+      <button class="secondary" {"disabled" if len(runs) < 2 else ""}>Compare runs</button></div>
+      <table><tr><th title="Before">Before</th><th title="After">After</th><th>Run</th><th>Passed</th><th>Cost</th><th>First word (median)</th><th>Settings</th></tr>{rows}</table></form>'''
+      if runs else '<p class="muted">No runs yet.</p>'}
     <h2>Scenarios</h2><table><tr><th>ID</th><th>Caller</th><th>Tags</th><th>Title</th></tr>
     {''.join(f"<tr><td>{e(s['id'])}</td><td>{'script' if 'script' in s['caller'] else 'simulated'}</td><td class='muted'>{e(', '.join(s.get('tags', [])))}</td><td>{e(s['title'])}</td></tr>" for s in scenarios)}</table>"""
     return page('Tests', body, '/tests')
+
+
+CHANGE_PILL = {'broke': ('bad', '▼ broke'), 'fixed': ('ok', '▲ fixed'), 'still failing': ('warn', 'still failing'),
+               'still passing': ('grey', 'still passing'), 'only after': ('info', 'new in after'), 'only before': ('grey', 'not in after')}
+
+
+def load_run(name):
+    folder = safe_child(harness.RUNS, name, r'\d{8}-\d{6}')
+    results = folder / 'results.json'
+    if not results.is_file():
+        raise HTTPException(404)
+    return json.loads(results.read_text(encoding='utf-8'))
+
+
+def delta(before, after, unit, digits=1, lower_is_better=True, scale=1.0):
+    if before is None or after is None:
+        return ''
+    diff = (after - before) * scale
+    if round(diff, digits + 1) == 0:
+        return '<span class="muted">±0</span>'
+    good = (diff < 0) == lower_is_better
+    return f'<span style="color:var(--{"green" if good else "red"});font-weight:600">{"+" if diff > 0 else "−"}{abs(diff):.{digits}f}{unit}</span>'
+
+
+@app.get('/tests/compare')
+async def tests_compare(a: str = '', b: str = ''):
+    runs = harness_runs()
+    if len(runs) < 2 and not (a and b):
+        return page('Compare runs', '<div class="toolbar"><a href="/tests">← Tests</a></div><h1>Compare runs</h1>'
+                    '<div class="empty">Two test runs are needed to compare.</div>', '/tests')
+    a, b = a or runs[1]['name'], b or runs[0]['name']
+    if a == b:
+        raise HTTPException(400, 'Pick two different runs.')
+    da, db = load_run(a), load_run(b)
+    c = harness.compare_runs(da, db)
+    ta, tb = c['a'], c['b']
+    secs = lambda ms: f'{ms / 1000:.1f} s' if ms is not None else '–'
+    rate = lambda t: f'{t["passed"]}/{t["total"]}'
+    sh = c['shared']
+    summary = f"""<div class="stats">
+      <div class="stat"><div class="v">{f"{sh['a']} → {sh['b']}" if sh['count'] else '–'}</div>
+        <div class="l">Fully passing, of the {sh['count']} scenarios in both runs</div>
+        <div class="s">whole runs: {rate(ta)} → {rate(tb)}</div></div>
+      <div class="stat"><div class="v">{c['counts']['fixed']} ▲ · {c['counts']['broke']} ▼</div><div class="l">Fixed · broke</div>
+        <div class="s">{c['counts']['fixed']} fixed · {c['counts']['broke']} broke · {c['counts']['still failing']} still failing</div></div>
+      <div class="stat"><div class="v">{secs(ta['first_ms'])} → {secs(tb['first_ms'])}</div><div class="l">Median time to first word</div>
+        <div class="s">{delta(ta['first_ms'], tb['first_ms'], ' s', 2, scale=0.001)}</div></div>
+      <div class="stat"><div class="v">US${ta['cost']:.3f} → US${tb['cost']:.3f}</div><div class="l">Run cost</div>
+        <div class="s">per scenario US${ta['cost'] / max(ta['total'], 1):.4f} → US${tb['cost'] / max(tb['total'], 1):.4f}</div></div></div>"""
+    if c['changed']:
+        changed = ('<div class="card"><b>What changed between the runs</b><ul style="margin:6px 0 0">'
+                   + ''.join(f'<li>{e(k)}: <code>{e(x)}</code> → <code>{e(y)}</code></li>' for k, x, y in c['changed']) + '</ul></div>')
+    else:
+        changed = '<div class="card"><b>What changed between the runs</b><p class="muted" style="margin-bottom:0">No setting or version difference recorded'
+        changed += (': differences are model variation (run with repeat 2–3 to tell).' if c['versions_known'] else
+                    '. Older runs did not record the code, prompt or knowledge version; new runs do.') + '</p></div>'
+    warnings = []
+    if ta['skipped'] or tb['skipped']:
+        warnings.append('A run stopped at its budget, so some scenarios were not run in it.')
+    if c['counts']['only before'] or c['counts']['only after']:
+        warnings.append('The runs did not cover the same scenarios; only shared scenarios are compared fairly.')
+    lines = []
+    for r in c['rows']:
+        pill_class, label = CHANGE_PILL[r['change']]
+        cell = lambda s: ('<span class="muted">–</span>' if s is None else
+                          f'<span class="pill {"ok" if s["state"] == "pass" else "bad" if s["state"] == "fail" else "warn"}">'
+                          f'{s["passed"]}/{s["runs"]}</span>')
+        sa, sb = r['a'], r['b']
+        reasons = ''
+        if (sb and sb['reasons']) or (sa and sa['reasons'] and r['change'] == 'fixed'):
+            parts = []
+            if sa and sa['reasons']:
+                parts.append('<b>Before</b><ul>' + ''.join(f'<li>{e(x)}</li>' for x in sa['reasons']) + '</ul>')
+            if sb and sb['reasons']:
+                parts.append('<b>After</b><ul>' + ''.join(f'<li>{e(x)}</li>' for x in sb['reasons']) + '</ul>')
+            reasons = f'<details style="border:0;padding:0;margin:4px 0 0"><summary class="muted" style="font-weight:400">why</summary>{"".join(parts)}</details>'
+        lines.append(f"""<tr><td><span class="pill {pill_class}">{label}</span></td><td><b>{e(r['id'])}</b></td><td>{e(r['title'])}{reasons}</td>
+          <td>{cell(sa)}</td><td>{cell(sb)}</td>
+          <td>{secs(sb['first_ms']) if sb else '–'} {delta(sa and sa['first_ms'], sb and sb['first_ms'], ' s', 1, scale=0.001) if sa and sb else ''}</td>
+          <td>{f"US${sb['cost']:.4f}" if sb else '–'} {delta(sa and sa['cost'], sb and sb['cost'], '', 4) if sa and sb else ''}</td></tr>""")
+    rerun = [r['id'] for r in c['rows'] if r['change'] in ('broke', 'still failing') and re.fullmatch(r'[A-Za-z0-9-]+', r['id'])]
+    rerun_form = (f'<form method="post" action="/tests/run" class="inline">{token_field()}<input type="hidden" name="only" value="{e(",".join(rerun))}">'
+                  f'<input type="hidden" name="repeat" value="2"><input type="hidden" name="budget" value="0.50">'
+                  f'<button>Re-run the {len(rerun)} failing scenario{"s" if len(rerun) != 1 else ""} twice</button></form>') if rerun else ''
+    options = lambda chosen: ''.join(f'<option value="{e(r["name"])}" {"selected" if r["name"] == chosen else ""}>'
+                                     f'{e(r["data"]["settings"].get("started"))} · {r["passed"]}/{r["total"]}</option>' for r in runs)
+    body = f"""<div class="toolbar"><a href="/tests">← Tests</a></div><h1>Compare runs</h1>
+    <form method="get" class="toolbar">Before <select name="a">{options(a)}</select> After <select name="b">{options(b)}</select>
+      <button class="secondary">Compare</button> <a href="/tests/compare?a={e(b)}&b={e(a)}">swap</a></form>
+    {summary}{changed}{''.join(f'<div class="notice">{e(w)}</div>' for w in warnings)}
+    <div class="toolbar" style="margin-top:14px"><h2 style="margin:0">By scenario</h2><span style="flex:1"></span>{rerun_form}</div>
+    <table><tr><th>Change</th><th>ID</th><th>Scenario</th><th>Before</th><th>After</th><th>First word (after, change)</th><th>Cost (after, change)</th></tr>
+    {''.join(lines)}</table>
+    <p class="muted">Results show passes out of repeats. A scenario that passes in one run and fails in another without any change is
+    model variation: run it with repeat 2–3 before trusting a single result.</p>"""
+    return page('Compare runs', body, '/tests')
 
 
 @app.post('/tests/run')
@@ -673,7 +797,10 @@ async def test_run(name: str):
           {f"(run {r['repeat']})" if r['repeat'] > 1 else ''} <span class="muted">· US${r['cost']:.3f}</span></summary>
           <ul>{checks}{verdicts}</ul><pre>{e(transcript)}</pre></details>""")
     s = data['settings']
-    body = f"""<p><a href="/tests">← Tests</a></p><h1>Test run {e(s.get('started'))}</h1>
+    names = [r['name'] for r in harness_runs()]
+    previous = names[names.index(name) + 1] if name in names and names.index(name) + 1 < len(names) else None
+    compare = f'<a class="btn ghost" href="/tests/compare?a={e(previous)}&b={e(name)}">Compare with previous run</a>' if previous else ''
+    body = f"""<div class="toolbar"><a href="/tests">← Tests</a><span style="flex:1"></span>{compare}</div><h1>Test run {e(s.get('started'))}</h1>
     <p class="muted">{sum(r['passed'] for r in data['results'])}/{len(data['results'])} passed · US${data['cost']:.3f} · {e(s.get('model'))} effort {e(s.get('effort'))}
     thinking {e(s.get('thinking') or 'default')} · judge {e(s.get('judge_model'))}{' · not run (budget): ' + e(', '.join(data['skipped'])) if data.get('skipped') else ''}</p>
     {''.join(blocks)}"""
@@ -831,6 +958,255 @@ async def knowledge_page():
     search = searched when needed. To change a document: edit it, update its registry entry (version, fingerprint, review), run the tests, restart.</p>
     <table><tr><th>Source</th><th>Version</th><th>Delivery</th><th>Readiness</th><th>Fingerprint</th><th>Bytes</th><th>Use when</th></tr>{''.join(rows)}</table>"""
     return page('Knowledge', body, '/knowledge')
+
+
+# ------------------------------------------------------------------ issues
+
+STATUS_PILL = {'new': 'info', 'open': 'warn', 'fixed': 'ok', 'dismissed': 'grey'}
+CHECK_PILL = {'verified': 'ok', 'passing': 'ok', 'failing': 'bad', 'waiting': 'warn', 'not run': 'grey'}
+
+
+def scenario_results():
+    """Scenario id -> [(passed, run started)], newest run first."""
+    found = {}
+    for run in harness_runs():
+        for r in run['data']['results']:
+            found.setdefault(r['id'], []).append((r['passed'], run['data']['settings'].get('started', '')))
+    return found
+
+
+def scenario_ids():
+    return [s['id'] for s in json.loads(harness.SCENARIOS.read_text(encoding='utf-8'))['scenarios']]
+
+
+def status_pill(status):
+    return f'<span class="pill {STATUS_PILL[status]}">{e(issue_store.STATUSES[status])}</span>'
+
+
+def check_pill(check):
+    return f'<span class="pill {CHECK_PILL[check["state"]]}">{e(check["text"])}</span>' if check else ''
+
+
+def issue_id(value):
+    if not re.fullmatch(r'ISS-\d{3,6}', value or ''):
+        raise HTTPException(404)
+    return value
+
+
+def issues_table(rows, results, selectable=True):
+    if not rows:
+        return '<div class="empty">No issues here.</div>'
+    lines = []
+    for i in rows:
+        call = (f'<a href="{call_url(i["call_file"])}">{e(i["reference"] or "call")}</a>' if i.get('call_file')
+                else e(i['reference'] or '–'))
+        test = (f'<code>{e(i["scenario"])}</code> {check_pill(issue_store.verification(i, results))}' if i['scenario']
+                else '<span class="muted">–</span>')
+        box = f'<td><input type="checkbox" name="ids" value="{e(i["id"])}"></td>' if selectable else ''
+        lines.append(f"""<tr>{box}<td><a href="/issues/{e(i['id'])}"><b>{e(i['id'])}</b></a></td>
+          <td><a href="/issues/{e(i['id'])}" style="color:var(--ink);text-decoration:none">{e(i['title'])}</a>
+          <div class="muted" style="font-size:12px">{e(issue_store.SOURCES[i['source']])} · {when(i['created'])}</div></td>
+          <td>{call}</td><td class="muted">{e(i['category'])}</td><td>{status_pill(i['status'])}</td><td>{test}</td></tr>""")
+    head = '<th></th>' if selectable else ''
+    return (f'<table><tr>{head}<th>ID</th><th>Issue</th><th>Call</th><th>Category</th><th>Status</th><th>Test</th></tr>'
+            f'{"".join(lines)}</table>')
+
+
+@app.get('/issues')
+async def issues_page(status: str = 'active', q: str = '', category: str = '', source: str = '', added: str = ''):
+    issue_store.sync()
+    data = issue_store.load()
+    everything = data['issues']
+    counts = {s: sum(i['status'] == s for i in everything) for s in issue_store.STATUSES}
+    rows = [i for i in everything if (i['status'] in issue_store.ACTIVE if status == 'active' else status == 'all' or i['status'] == status)
+            and (not category or i['category'] == category) and (not source or i['source'] == source)
+            and (not q or q.lower() in (i['title'] + ' ' + i['detail'] + ' ' + i['reference'] + ' ' + i['id']).lower())]
+    rows.sort(key=lambda i: i['created'], reverse=True)  # newest first within each status
+    rows.sort(key=lambda i: list(issue_store.STATUSES).index(i['status']))
+    tabs = [('active', f'Needs action ({counts["new"] + counts["open"]})')] + \
+           [(s, f'{label} ({counts[s]})') for s, label in issue_store.STATUSES.items()] + [('all', f'All ({len(everything)})')]
+    tab_html = ''.join(f'<a class="btn {"" if s == status else "ghost"}" href="/issues?status={s}">{e(label)}</a>' for s, label in tabs)
+    themes = {}
+    for i in everything:
+        if i['status'] in issue_store.ACTIVE:
+            themes[i['title']] = themes.get(i['title'], 0) + 1
+    common = sorted(((n, t) for t, n in themes.items() if n > 1), reverse=True)[:5]
+    common_html = ('<div class="card" style="margin:12px 0"><b>Recurring themes</b> <span class="muted">(same finding on several calls: '
+                   'fix once, then select them all below)</span><ul style="margin:6px 0 0">'
+                   + ''.join(f'<li><a href="/issues?status=active&q={quote(t)}">{e(t)}</a> <span class="pill warn">{n} calls</span></li>' for n, t in common)
+                   + '</ul></div>') if common else ''
+    cat_options = ''.join(f'<option {"selected" if c == category else ""}>{e(c)}</option>' for c in issue_store.CATEGORIES)
+    src_options = ''.join(f'<option value="{k}" {"selected" if k == source else ""}>{e(v)}</option>' for k, v in issue_store.SOURCES.items())
+    bulk = ''.join(f'<option value="{s}">{e(label)}</option>' for s, label in issue_store.STATUSES.items())
+    notice = f'<div class="notice">Added <a href="/issues/{e(added)}"><b>{e(added)}</b></a>.</div>' if added else ''
+    body = f"""<h1>Issues</h1><p class="muted">Every problem found in calls, from the automatic review, spoken reports or added by hand.
+    Confirm it (open), link a test scenario that reproduces it, fix it, and the next test run verifies it.</p>{notice}
+    <div class="toolbar">{tab_html}<span style="flex:1"></span><a class="btn ghost" href="/issues.csv">Export CSV</a></div>
+    <form method="get" class="toolbar"><input type="hidden" name="status" value="{e(status)}">
+      <input name="q" value="{e(q)}" placeholder="Search issues" size="28">
+      <select name="category"><option value="">All categories</option>{cat_options}</select>
+      <select name="source"><option value="">All sources</option>{src_options}</select><button class="secondary">Filter</button></form>
+    {common_html}
+    <form method="post" action="/issues/bulk">{token_field()}<input type="hidden" name="back" value="{e(status)}">
+      <div class="toolbar"><span class="muted">Selected:</span><select name="status">{bulk}</select>
+      <input name="note" placeholder="Note (optional), e.g. duplicate of ISS-004" size="34"><button class="secondary">Update selected</button>
+      <a href="#" onclick="document.querySelectorAll('input[name=ids]').forEach(c=>c.checked=true);return false">select all shown</a></div>
+      {issues_table(rows, scenario_results())}</form>
+    <details style="margin-top:16px"><summary>+ Add an issue by hand (for example a report posted in Teams)</summary>
+      <form method="post" action="/issues/new" style="display:grid;gap:8px;max-width:640px;margin-top:8px">{token_field()}
+      <input name="title" placeholder="What went wrong, in one line" required>
+      <textarea name="detail" rows="3" placeholder="Details: what the caller said, what the agent did, what it should have done (no patient names)"
+        style="padding:6px 8px;border:1px solid var(--line);border-radius:6px;font:inherit"></textarea>
+      <div class="toolbar"><input name="reference" placeholder="Call reference, e.g. 3444" size="18" pattern="\\d{{4}}">
+      <select name="category">{''.join(f'<option>{e(c)}</option>' for c in issue_store.CATEGORIES)}</select><button>Add issue</button></div></form></details>"""
+    return page('Issues', body, '/issues')
+
+
+@app.post('/issues/bulk')
+async def issues_bulk(token: str = Form(''), ids: list[str] = Form([]), status: str = Form(''), note: str = Form(''),
+                      back: str = Form('active')):
+    check_token(token)
+    if status not in issue_store.STATUSES:
+        raise HTTPException(400, 'Unknown status.')
+    try:
+        issue_store.update([issue_id(i) for i in ids], status=status, note=note)
+    except KeyError:
+        raise HTTPException(404)
+    target = back if back in (*issue_store.STATUSES, 'active', 'all') else 'active'
+    return RedirectResponse(f'/issues?status={target}', status_code=303)
+
+
+@app.post('/issues/new')
+async def issues_new(token: str = Form(''), title: str = Form(''), detail: str = Form(''), reference: str = Form(''),
+                     category: str = Form('unsorted')):
+    check_token(token)
+    if reference and not re.fullmatch(r'\d{4}', reference):
+        raise HTTPException(400, 'A call reference is four digits.')
+    try:
+        issue = issue_store.add(title[:300], detail[:4000], reference, category)
+    except ValueError as error:
+        raise HTTPException(400, str(error))
+    return RedirectResponse(f'/issues?added={issue["id"]}', status_code=303)
+
+
+@app.get('/issues.csv')
+async def issues_csv():
+    import csv
+    import io
+    out = io.StringIO()
+    writer = csv.writer(out)
+    writer.writerow(['id', 'created', 'call_reference', 'source', 'category', 'title', 'detail', 'status', 'scenario_id',
+                     'fixed_in', 'fixed_at'])
+    for i in issue_store.load()['issues']:
+        writer.writerow([i['id'], i['created'], i['reference'], i['source'], i['category'], i['title'], i['detail'],
+                         i['status'], i['scenario'], i['fixed_in'], i['fixed_at']])
+    return PlainTextResponse(out.getvalue(), media_type='text/csv; charset=utf-8',
+                             headers={'Content-Disposition': f'attachment; filename="issues-{datetime.now():%Y%m%d}.csv"'})
+
+
+@app.get('/issues/{value}')
+async def issue_page(value: str, saved: str = ''):
+    data = issue_store.load()
+    issue = issue_store.get(data, issue_id(value))
+    if issue is None:
+        raise HTTPException(404)
+    results = scenario_results()
+    check = issue_store.verification(issue, results)
+    others = [i for i in data['issues'] if i['id'] != issue['id'] and i['title'] == issue['title'] and i['status'] in issue_store.ACTIVE]
+    call = ''
+    if issue.get('call_file') and (transcripts.FOLDER / issue['call_file']).is_file():
+        info = transcripts.summary(transcripts.FOLDER / issue['call_file'])
+        call = (f'<div class="card" style="margin-top:12px"><b>Call {e(info["reference"] or "")}</b> <span class="muted">{when(info["at"])} · '
+                f'{info["turns"]} caller turns</span> · <a href="{call_url(issue["call_file"])}">open the call</a>'
+                f'<details><summary>Show the conversation</summary><div class="chat" style="margin-top:8px">{transcript_html(info["records"])}</div></details></div>')
+    status_options = ''.join(f'<option value="{s}" {"selected" if s == issue["status"] else ""}>{e(label)}</option>'
+                             for s, label in issue_store.STATUSES.items())
+    cat_options = ''.join(f'<option {"selected" if c == issue["category"] else ""}>{e(c)}</option>' for c in issue_store.CATEGORIES)
+    scen_options = '<option value="">none</option>' + ''.join(
+        f'<option {"selected" if s == issue["scenario"] else ""}>{e(s)}</option>' for s in scenario_ids())
+    make = (f'<form class="inline" method="post" action="/issues/{e(issue["id"])}/scenario">{token_field()}'
+            f'<button class="ghost">Make a scenario from this call</button></form>' if issue.get('call_file') and not issue['scenario'] else '')
+    run = (f'<form class="inline" method="post" action="/issues/{e(issue["id"])}/test">{token_field()}'
+           f'<button>Run {e(issue["scenario"])} now (≈2¢)</button></form>' if issue['scenario'] else '')
+    history = ''.join(f'<li><span class="muted">{when(h["at"])}</span> {e(h["change"])}</li>' for h in reversed(issue['history']))
+    steps = [('Confirm it is a real problem (set Open) or dismiss it', issue['status'] != 'new'),
+             ('Link a test scenario that reproduces it', bool(issue['scenario'])),
+             ('Fix it, restart, and set Fixed', issue['status'] == 'fixed'),
+             ('Run the scenario: it must pass after the fix', bool(check and check['state'] == 'verified'))]
+    guide = ('' if issue['status'] == 'dismissed' else '<div class="card"><b>Next steps</b><ol style="margin:6px 0 0;padding-left:20px">'
+             + ''.join(f'<li style="{"color:var(--muted);text-decoration:line-through" if done else ""}">{e(text)}</li>' for text, done in steps)
+             + '</ol></div>')
+    similar = (f'<div class="notice">{len(others)} other open issue{"s" if len(others) != 1 else ""} with the same finding: '
+               + ', '.join(f'<a href="/issues/{e(o["id"])}">{e(o["id"])}</a>' for o in others[:12])
+               + f' · <a href="/issues?status=active&q={quote(issue["title"])}">update them together</a></div>') if others else ''
+    body = f"""<div class="toolbar"><a href="/issues">← Issues</a></div>
+    <h1>{e(issue['id'])} {status_pill(issue['status'])} {check_pill(check)}</h1><h2 style="margin-top:4px">{e(issue['title'])}</h2>
+    {'<div class="notice">Saved.</div>' if saved else ''}{similar}
+    <div class="grid2" style="grid-template-columns:minmax(0,1fr) 340px;align-items:start"><div>
+      <div class="card"><p style="white-space:pre-wrap;margin-top:0">{e(issue['detail'])}</p>
+      <p class="muted" style="margin-bottom:0">{e(issue_store.SOURCES[issue['source']])} · {when(issue['created'])} · category {e(issue['category'])}
+      {f" · fixed in {e(issue['fixed_in'])}" if issue['fixed_in'] else ''}</p></div>{call}
+      <h2>History</h2><ul>{history}</ul></div>
+    <div>{guide}<div class="card" style="margin-top:12px"><b>Update</b>
+      <form method="post" action="/issues/{e(issue['id'])}" style="display:grid;gap:8px;margin-top:8px">{token_field()}
+        <label>Status <select name="status">{status_options}</select></label>
+        <label>Category <select name="category">{cat_options}</select></label>
+        <label>Test scenario <select name="scenario">{scen_options}</select></label>
+        <textarea name="note" rows="3" placeholder="Note: what you found or changed"
+          style="padding:6px 8px;border:1px solid var(--line);border-radius:6px;font:inherit"></textarea>
+        <button>Save</button></form>
+      <div class="toolbar" style="margin-top:8px">{make}{run}</div></div></div></div>"""
+    return page(issue['id'], body, '/issues')
+
+
+@app.post('/issues/{value}')
+async def issue_save(value: str, token: str = Form(''), status: str = Form(''), category: str = Form(''),
+                     scenario: str = Form(''), note: str = Form('')):
+    check_token(token)
+    if scenario and scenario not in scenario_ids():
+        raise HTTPException(400, 'Unknown scenario.')
+    try:
+        issue_store.update([issue_id(value)], status=status or None, category=category or None, scenario=scenario, note=note)
+    except KeyError:
+        raise HTTPException(404)
+    except ValueError as error:
+        raise HTTPException(400, str(error))
+    return RedirectResponse(f'/issues/{value}?saved=1', status_code=303)
+
+
+@app.post('/issues/{value}/scenario')
+async def issue_scenario(value: str, token: str = Form('')):
+    check_token(token)
+    issue = issue_store.get(issue_store.load(), issue_id(value))
+    if issue is None or not issue.get('call_file'):
+        raise HTTPException(404)
+    info = transcripts.summary(call_path(issue['call_file']))
+    key = info['reference'] or info['caller']
+    if not key:
+        raise HTTPException(400, 'This call has no reference or caller digits to look it up by.')
+    try:
+        scenario = harness.scenario_from_call(key)
+    except SystemExit as stop:
+        raise HTTPException(409, str(stop))
+    if scenario['id'] in scenario_ids():  # another issue from this call already made it: share it
+        issue_store.update([issue['id']], scenario=scenario['id'], note='linked the scenario already made from this call')
+    else:
+        scenario['judge'] = list(scenario.get('judge', [])) + [f'Does not repeat this problem: {issue["title"]}']
+        harness.add_scenario(scenario)
+        issue_store.update([issue['id']], scenario=scenario['id'],
+                           note='draft scenario made from the call; edit its expectations in scenarios.json')
+    return RedirectResponse(f'/issues/{value}?saved=1', status_code=303)
+
+
+@app.post('/issues/{value}/test')
+async def issue_test(value: str, token: str = Form('')):
+    check_token(token)
+    issue = issue_store.get(issue_store.load(), issue_id(value))
+    if issue is None or not issue['scenario'] or not re.fullmatch(r'[A-Za-z0-9-]+', issue['scenario']):
+        raise HTTPException(404)
+    command = [sys.executable, 'harness.py', '--budget', '0.25', '--repeat', '1', '--only', issue['scenario']]
+    title = f"Test {issue['scenario']} for {issue['id']}"
+    return RedirectResponse(f'/jobs/{start_job(title, command)}', status_code=303)
 
 
 @app.get('/live')
