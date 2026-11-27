@@ -23,6 +23,7 @@ import argparse
 import asyncio
 from datetime import datetime
 import json
+import os
 from pathlib import Path
 import re
 import statistics
@@ -38,7 +39,8 @@ import tickets
 
 HERE = Path(__file__).resolve().parent
 SCENARIOS = HERE / 'scenarios.json'
-RUNS = HERE.parent / 'build' / 'harness'
+# Test run results; a container points this at a persistent volume.
+RUNS = Path(os.environ['LSPCARE_RUNS_DIR']) if os.environ.get('LSPCARE_RUNS_DIR') else HERE.parent / 'build' / 'harness'
 CALLER_MODEL = 'claude-haiku-5-5'
 JUDGE_MODEL = 'claude-haiku-5-5'
 # US$ per million tokens: input, output, cache read, cache write (5-minute). List prices, Nov 2026.

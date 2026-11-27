@@ -8,6 +8,7 @@ Problem reports made by voice (report_problem tool) go to private-config/feedbac
 from datetime import datetime
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import secrets
@@ -35,7 +36,9 @@ def _git_version():
         return 'unknown'
 
 
-CODE_VERSION = _git_version()  # taken when the server starts, i.e. the code actually loaded
+# Taken when the server starts, i.e. the code actually loaded. A container image has no git
+# history: its build passes the commit in LSPCARE_VERSION instead.
+CODE_VERSION = os.environ.get('LSPCARE_VERSION', '').strip() or _git_version()
 
 
 def _fingerprint(text):

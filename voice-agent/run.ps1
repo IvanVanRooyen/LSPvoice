@@ -61,13 +61,21 @@ try {
         } else {
             Write-Host '=== Pointing the Twilio number at this run (waits for the tunnel to answer) ==='
             $pointed = $false
-            for ($attempt = 1; $attempt -le 3 -and -not $pointed; $attempt++) {
+            $serverHasIt = $false
+            for ($attempt = 1; $attempt -le 3 -and -not $pointed -and -not $serverHasIt; $attempt++) {
                 & $python configure.py --update-number
                 $pointed = ($LASTEXITCODE -eq 0)
-                if (-not $pointed -and $attempt -lt 3) { Write-Host "Retrying the number update ($attempt of 3 failed)..." }
+                $serverHasIt = ($LASTEXITCODE -eq 3)  # the number routes to a fixed address (the server)
+                if (-not $pointed -and -not $serverHasIt -and $attempt -lt 3) { Write-Host "Retrying the number update ($attempt of 3 failed)..." }
             }
             Write-Host ''
-            if ($pointed) {
+            if ($serverHasIt) {
+                Write-Host '#############################################################' -ForegroundColor Yellow
+                Write-Host '  The Twilio number stays with the SERVER; this PC run gets no calls.' -ForegroundColor Yellow
+                Write-Host '  To take the number for this PC: .venv\Scripts\python.exe configure.py --update-number --force' -ForegroundColor Yellow
+                Write-Host '  (and point it back at the server afterwards).' -ForegroundColor Yellow
+                Write-Host '#############################################################' -ForegroundColor Yellow
+            } elseif ($pointed) {
                 Write-Host '#############################################################' -ForegroundColor Green
                 Write-Host "  READY: the Twilio number now routes to $url/voice" -ForegroundColor Green
                 Write-Host '#############################################################' -ForegroundColor Green

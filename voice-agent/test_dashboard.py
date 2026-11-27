@@ -220,6 +220,62 @@ class DashboardTests(unittest.TestCase):
             self.assertIn('changed since you opened it', again)
             self.assertEqual(self.client.get('/knowledge/..%2Fregistry').status_code, 404)
 
+    def test_flow_edit_preview_and_save(self):
+        import shutil
+        import flows
+        folder = self.root / 'flows'
+        shutil.copytree(flows.FLOWS_DIR, folder, ignore=shutil.ignore_patterns('archive'))
+        with patch.object(dashboard, 'FLOWS_DIR', folder):
+            self.assertIn('/flows/log_ticket/edit', self.client.get('/flows').text)
+            form = self.client.get('/flows/log_ticket/edit').text
+            self.assertIn('name="step.location.instruction"', form); self.assertIn('Use the JSON below', form)
+            data = {'token': dashboard.TOKEN, 'version': '1.0', 'role': 'Product owner', 'note': 'Clearer wording',
+                    'step.contact.instruction': 'Ask for their name <b>, then a callback number.'}
+            self.assertEqual(self.client.post('/flows/log_ticket/preview', data={**data, 'token': 'x'}).status_code, 403)
+            preview = self.client.post('/flows/log_ticket/preview', data=data).text
+            self.assertIn('Checked exactly as the voice agent checks flows', preview)
+            self.assertIn('Ask for their name &lt;b&gt;, then a callback number.', preview)
+            proposed = re.search(r'<textarea name="json" hidden>(.*?)</textarea>', preview, re.S).group(1)
+            import html
+            # Making a required detail optional is refused, and the form comes back with the error.
+            refused = self.client.post('/flows/log_ticket/preview', data={**data, 'field.callback_number.present': '1',
+                                                                                    'field.callback_number.optional': '1'}).text
+            self.assertIn('callback_number', refused); self.assertIn('Preview and check', refused)
+            broken = self.client.post('/flows/log_ticket/preview', data={**data, 'use_json': '1', 'json': '{not json'}).text
+            self.assertIn('The JSON is not valid', broken); self.assertIn('{not json', broken)
+            saved = self.client.post('/flows/log_ticket/save', data={'token': dashboard.TOKEN, 'version': '1.0', 'role': 'Product owner',
+                                                                    'note': 'Clearer wording', 'json': html.unescape(proposed)},
+                                     follow_redirects=False)
+            self.assertEqual(saved.status_code, 303)
+            after = self.client.get(saved.headers['location']).text
+            self.assertIn('restart run.ps1', after); self.assertIn('v1.1', after)
+            self.assertEqual(flows.load_flows(folder)['log_ticket']['steps'][2]['instruction'], 'Ask for their name <b>, then a callback number.')
+            self.assertEqual(self.client.get('/flows/nope/edit').status_code, 404)
+            self.assertEqual(self.client.get('/flows/..%2F..%2Fx/edit').status_code, 404)
+
+    def test_editing_off_on_a_server(self):
+        path = self.make_call()
+        issues.sync()
+        with patch.object(dashboard, 'EDITING', False):
+            for url in ['/knowledge/KB-PRICES/edit', '/flows/log_ticket/edit']:
+                self.assertEqual(self.client.get(url).status_code, 403, url)
+            for url in ['/knowledge/KB-PRICES/preview', '/knowledge/KB-PRICES/save', '/flows/log_ticket/save',
+                        f'/calls/{path.stem}/scenario']:
+                self.assertEqual(self.client.post(url, data={'token': dashboard.TOKEN}).status_code, 403, url)
+            self.assertNotIn('/knowledge/KB-PRICES/edit', self.client.get('/knowledge/KB-PRICES').text)
+            self.assertNotIn('/flows/log_ticket/edit', self.client.get('/flows').text)
+            self.assertNotIn('Make test scenario</button>', self.client.get(f'/calls/{path.stem}').text)
+            self.assertEqual(self.client.get('/settings').status_code, 200)  # settings and the rest still work
+
+    def test_container_environment(self):
+        import os
+        import subprocess
+        import sys
+        env = {**os.environ, 'LSPCARE_VERSION': 'abc1234', 'LSPCARE_RUNS_DIR': str(self.root / 'runs-elsewhere')}
+        out = subprocess.run([sys.executable, '-c', 'import pilot_log, harness; print(pilot_log.CODE_VERSION, harness.RUNS.name)'],
+                             capture_output=True, text=True, env=env, cwd=str(Path(dashboard.__file__).parent), timeout=60)
+        self.assertEqual(out.stdout.split()[-2:], ['abc1234', 'runs-elsewhere'], out.stderr)
+
     def test_call_becomes_scenario(self):
         path = self.make_call()
         response = self.client.post(f'/calls/{path.stem}/scenario', data={'token': dashboard.TOKEN}, follow_redirects=False)

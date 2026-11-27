@@ -81,6 +81,9 @@ our Zoho org), optionally `api.openai.com`. Twilio must reach the service inboun
 
 ## 6. Packaging: Docker
 
+**Status:** `Dockerfile`, `compose.yaml` (agent, Cloudflare named tunnel, dashboard) and the code
+changes below now exist, for a staff-testing server. Setup and operation: [home-server.md](home-server.md).
+
 Docker suits this service well:
 - **Versioning:** every image is tagged with its git commit, which is also the version stamp
   written into each call transcript. Rolling back means running the previous image.

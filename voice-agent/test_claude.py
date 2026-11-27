@@ -186,6 +186,23 @@ class NumberRoutingTests(unittest.TestCase):
             configure.point_number({**CFG, 'number_sid': 'PN2'}, client)
         self.assertEqual(updates[0][0], 'PN2')
 
+    def test_server_keeps_the_number_unless_forced(self):
+        quick = {**CFG, 'public_base': 'https://word-word-word.trycloudflare.com'}
+        server = SimpleNamespace(sid='PN1', phone_number='+61255503624', voice_url='https://voice.example.org/voice',
+                                 voice_application_sid=None)
+        client, updates = self.fake([server])
+        with patch.object(configure, 'wait_until_public'):
+            with self.assertRaises(configure.NumberProtected):  # a PC's run.ps1 cannot take it from the server
+                configure.point_number(dict(quick), client)
+        self.assertEqual(updates, [])
+        with patch.object(configure, 'wait_until_public'), redirect_stdout(io.StringIO()):
+            configure.point_number(dict(quick), client, force=True)
+            self.assertEqual(updates[-1][1], 'https://word-word-word.trycloudflare.com/voice')
+            # Quick tunnel to quick tunnel (normal PC restarts) and anything to a fixed address still work.
+            old_quick = SimpleNamespace(**{**vars(server), 'voice_url': 'https://old-old-old.trycloudflare.com/voice'})
+            configure.point_number(dict(quick), self.fake([old_quick])[0])
+            configure.point_number({**CFG, 'public_base': 'https://voice.example.org'}, self.fake([old_quick])[0])
+
 
 if __name__ == '__main__':
     unittest.main()

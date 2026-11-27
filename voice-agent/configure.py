@@ -127,8 +127,19 @@ def wait_until_public(base, seconds=180):
         time.sleep(3)
 
 
-def point_number(config, client=None):
-    """Set the pilot number's own Voice webhook to this run's /voice URL, then read it back."""
+class NumberProtected(ValueError):
+    """The number routes to a fixed address (e.g. the server) and this run would move it to a quick tunnel."""
+
+
+def _quick_tunnel(url):
+    return (urlsplit(url or '').hostname or '').endswith('.trycloudflare.com')
+
+
+def point_number(config, client=None, force=False):
+    """Set the pilot number's own Voice webhook to this run's /voice URL, then read it back.
+
+    A number routed to a fixed address (the server) is never moved to a temporary quick tunnel
+    unless force is set, so starting run.ps1 on a PC cannot take calls away from the server."""
     if not config.get('public_base'):
         raise ValueError('No public URL saved yet; run with --public-url first.')
     wait_until_public(config['public_base'])
@@ -145,6 +156,10 @@ def point_number(config, client=None):
         raise ValueError('This number is routed through a TwiML App, which overrides its webhook; '
                          'change routing in the Twilio Console instead.')
     url = config['public_base'] + '/voice'
+    if (not force and number.voice_url and number.voice_url != url
+            and _quick_tunnel(url) and not _quick_tunnel(number.voice_url)):
+        raise NumberProtected(f'the number routes to a fixed address ({urlsplit(number.voice_url).hostname}), probably the '
+                              'server. Left unchanged. To take it back for this run: configure.py --update-number --force')
     updated = client.incoming_phone_numbers(number.sid).update(voice_url=url, voice_method='POST')
     if (updated.voice_url, updated.voice_method) != (url, 'POST'):
         raise ValueError('Twilio did not confirm the new webhook; check the number in the Console.')
@@ -164,6 +179,8 @@ def main():
     modes.add_argument('--use-openai', action='store_true', help='Answer calls with OpenAI again')
     modes.add_argument('--set', action='append', metavar='KEY=VALUE',
                        help='Change a non-secret setting (repeatable): ' + ', '.join(SETTINGS))
+    parser.add_argument('--force', action='store_true',
+                        help='With --update-number: move the number even from a fixed address to a quick tunnel')
     args = parser.parse_args()
     if CONFIG.is_symlink() or CONFIG.parent.is_symlink():
         raise ValueError('Refusing symlink configuration')
@@ -173,7 +190,7 @@ def main():
         for pair in args.set:
             apply_setting(config, pair)
     elif args.update_number:
-        point_number(config)
+        point_number(config, force=args.force)
     elif args.public_url:
         config['public_base'] = validate_url(args.public_url)
     elif args.use_claude:
@@ -210,6 +227,9 @@ def main():
 if __name__ == '__main__':
     try:
         main()
+    except NumberProtected as error:
+        print('Number not moved:', error)
+        raise SystemExit(3)  # run.ps1 reads 3 as "the server has the number"
     except (OSError, ValueError, EOFError, KeyboardInterrupt) as error:
         if '--update-number' in sys.argv:
             print('Number update stopped:', error)

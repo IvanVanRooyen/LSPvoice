@@ -28,6 +28,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTex
 import configure
 import flows as flow_engine
 import harness
+import flow_edit
 import issues as issue_store
 import knowledge_edit
 from knowledge import CORE_LIMIT, DELIVERY, LIBRARY, Library
@@ -41,7 +42,18 @@ HOST, PORT = '127.0.0.1', 8102
 ALLOWED_HOSTS = {f'{HOST}:{PORT}', f'localhost:{PORT}'}
 TOKEN = secrets.token_urlsafe(24)
 HERE = Path(__file__).resolve().parent
-PILOT_HEALTH = 'http://127.0.0.1:8101/health'
+PILOT_HEALTH = os.environ.get('LSPCARE_AGENT_HEALTH', 'http://127.0.0.1:8101/health')  # in compose: http://agent:8101/health
+# Knowledge, flow and scenario edits change files in the repository. In a container those files are
+# part of the image (lost on rebuild, never committed), so the server sets LSPCARE_EDITING=off and
+# edits are made on a development PC, committed, and deployed by rebuilding the image.
+EDITING = os.environ.get('LSPCARE_EDITING', 'on').lower() != 'off'
+EDITING_OFF = ('Editing is off on this server: knowledge, flows and test scenarios are part of the deployed image. '
+               'Make the change on a development PC, commit it, and rebuild the image here.')
+
+
+def require_editing():
+    if not EDITING:
+        raise HTTPException(403, EDITING_OFF)
 JOBS = {}  # job id -> {'title', 'command', 'started', 'lines', 'done', 'code'}
 
 app = FastAPI(title='LSPcare voice agent dashboard', docs_url=None, redoc_url=None, openapi_url=None)
@@ -841,7 +853,7 @@ async def call_detail(name: str, made: str = ''):
     <div><div class="card"><b>Automatic review</b>{review_html}
       <form class="inline" method="post" action="{url}/review">{token_field()}<button class="secondary">{'Review again' if reviewed else 'Review this call'} (≈1¢)</button></form></div>
     <div class="card" style="margin-top:12px"><b>Turn into a test</b><p class="muted">Adds a draft scenario that replays the caller's lines{', with the reported problem as a judge criterion' if info['reports'] else ''}.</p>
-      {f'<form class="inline" method="post" action="{url}/scenario">{token_field()}<button>Make test scenario</button></form>' if (info['reference'] or info['caller']) else '<p class="muted">This call was recorded before call references, so it cannot be converted automatically.</p>'}</div>
+      {f'<form class="inline" method="post" action="{url}/scenario">{token_field()}<button>Make test scenario</button></form>' if (info['reference'] or info['caller']) and EDITING else '<p class="muted">Editing is off on this server.</p>' if not EDITING else '<p class="muted">This call was recorded before call references, so it cannot be converted automatically.</p>'}</div>
     <div class="card" style="margin-top:12px"><b>Agent version</b><p class="muted" style="margin-bottom:0">{version}</p></div></div></div>"""
     return page(f'Call {info["reference"] or ""}', body, '/calls')
 
@@ -849,6 +861,7 @@ async def call_detail(name: str, made: str = ''):
 @app.post('/calls/{name}/scenario')
 async def call_to_scenario(name: str, token: str = Form('')):
     check_token(token)
+    require_editing()
     path = call_path(name)
     info = transcripts.summary(path)
     key = info['reference'] or info['caller']
@@ -1270,10 +1283,47 @@ async def settings_save(token: str = Form(''), key: str = Form(...), value: str 
     return RedirectResponse(f'/settings?saved={key}#{key}', status_code=303)
 
 
+FLOWS_DIR = flow_engine.FLOWS_DIR
+
+
+def flow_diagram(flow):
+    """The flow drawn as boxes and arrows, plus its fields table."""
+    fields = flow['fields']
+    steps = [f'<div class="fstep end"><b>{e(flow["title"])}</b><div class="muted">starts when: {e(flow["use_when"])}</div></div>']
+    for number, step in enumerate(flow['steps'], 1):
+        if step['kind'] == 'collect':
+            need = [fields[f]['label'] for f in step.get('fields', [])]
+            if step.get('one_of'):
+                need.append(' or '.join(fields[f]['label'] for f in step['one_of']))
+            extra = [fields[f]['label'] for f in step.get('also', [])]
+            detail = ('Needs: ' + ', '.join(need)) + ((' · optional: ' + ', '.join(extra)) if extra else '')
+            kind = 'collect · each value checked in code'
+        elif step['kind'] == 'confirm':
+            detail = 'System writes the read-back; the caller must say yes in a later turn. "No" → correct a detail → new read-back.'
+            kind = 'confirm'
+        else:
+            detail = f'System runs {step["action"]} only after the yes. The AI cannot run it directly.'
+            kind = 'action'
+        steps.append('<div class="arrow">↓</div>')
+        steps.append(f'<div class="fstep {step["kind"]}"><div class="kind">{number} · {e(kind)}</div><b>{e(step["title"])}</b>'
+                     f'<div class="muted">{e(detail)}</div><div style="margin-top:4px">{e(step["instruction"])}</div></div>')
+    steps.append('<div class="arrow">↓</div>')
+    steps.append(f'<div class="fstep end"><div class="muted">Success: {e(flow["on_success"])}<br>Failure: {e(flow["on_failure"])}</div></div>')
+    field_rows = ''.join(f"<tr><td>{e(spec['label'])}</td><td><code>{e(name)}</code></td><td>{e(spec['type'])}</td>"
+                         f"<td>{'optional' if spec.get('optional') else 'required'}</td><td class='muted'>{e(spec.get('ask', ''))}</td></tr>"
+                         for name, spec in fields.items())
+    return (f'<div class="grid2"><div class="flow">{"".join(steps)}</div>'
+            f'<div><table><tr><th>Field</th><th>Name</th><th>Type</th><th></th><th>Asked as</th></tr>{field_rows}</table>'
+            f'<details><summary>Mermaid diagram (for documents)</summary><pre>{e(flow_engine.mermaid(flow))}</pre></details></div></div>')
+
+
+RESTART_NOTE = 'The voice agent reads flows when it starts: restart run.ps1 for calls to use this version.'
+
+
 @app.get('/flows')
-async def flows_page():
+async def flows_page(saved: str = ''):
     try:
-        defs = flow_engine.load_flows()
+        defs = flow_engine.load_flows(FLOWS_DIR)
     except flow_engine.FlowError as error:
         return page('Flows', f'<h1>Flows</h1><p><span class="pill bad">Flow files are invalid: {e(error)}</span></p>', '/flows')
     cfg = read_config()
@@ -1281,37 +1331,151 @@ async def flows_page():
              else '<span class="pill warn">off: tickets use the direct tool</span>')
     blocks = []
     for flow in defs.values():
-        fields = flow['fields']
-        steps = [f'<div class="fstep end"><b>{e(flow["title"])}</b><div class="muted">starts when: {e(flow["use_when"])}</div></div>']
-        for number, step in enumerate(flow['steps'], 1):
-            if step['kind'] == 'collect':
-                need = [fields[f]['label'] for f in step.get('fields', [])]
-                if step.get('one_of'):
-                    need.append(' or '.join(fields[f]['label'] for f in step['one_of']))
-                extra = [fields[f]['label'] for f in step.get('also', [])]
-                detail = ('Needs: ' + ', '.join(need)) + ((' · optional: ' + ', '.join(extra)) if extra else '')
-                kind = 'collect · each value checked in code'
-            elif step['kind'] == 'confirm':
-                detail = 'System writes the read-back; the caller must say yes in a later turn. "No" → correct a detail → new read-back.'
-                kind = 'confirm'
-            else:
-                detail = f'System runs {step["action"]} only after the yes. The AI cannot run it directly.'
-                kind = 'action'
-            steps.append('<div class="arrow">↓</div>')
-            steps.append(f'<div class="fstep {step["kind"]}"><div class="kind">{number} · {e(kind)}</div><b>{e(step["title"])}</b>'
-                         f'<div class="muted">{e(detail)}</div><div style="margin-top:4px">{e(step["instruction"])}</div></div>')
-        steps.append('<div class="arrow">↓</div>')
-        steps.append(f'<div class="fstep end"><div class="muted">Success: {e(flow["on_success"])}<br>Failure: {e(flow["on_failure"])}</div></div>')
-        field_rows = ''.join(f"<tr><td>{e(spec['label'])}</td><td><code>{e(name)}</code></td><td>{e(spec['type'])}</td>"
-                             f"<td>{'optional' if spec.get('optional') else 'required'}</td><td class='muted'>{e(spec.get('ask', ''))}</td></tr>"
-                             for name, spec in fields.items())
-        blocks.append(f"""<h2>{e(flow['title'])} <span class="muted">({e(flow['id'])})</span></h2>
-          <div class="grid2"><div class="flow">{''.join(steps)}</div>
-          <div><table><tr><th>Field</th><th>Name</th><th>Type</th><th></th><th>Asked as</th></tr>{field_rows}</table>
-          <details><summary>Mermaid diagram (for documents)</summary><pre>{e(flow_engine.mermaid(flow))}</pre></details></div></div>""")
+        history = ''.join(f'<li><b>v{e(h["version"])}</b> {e(h["date"])} · {e(h["approved_by"])}: {e(h["note"])}</li>'
+                          for h in reversed(flow.get('change_history', [])))
+        blocks.append(f"""<div class="toolbar" style="margin-top:22px"><h2 style="margin:0">{e(flow['title'])}
+          <span class="muted">({e(flow['id'])} · v{e(flow.get('version', '1.0'))})</span></h2><span style="flex:1"></span>
+          {f'<a class="btn" href="/flows/{e(flow["id"])}/edit">Edit</a>' if EDITING else ''}</div>
+          {flow_diagram(flow)}{f'<details><summary>Change history</summary><ul>{history}</ul></details>' if history else ''}""")
+    notice = (f'<div class="notice">Saved <b>{e(saved)}</b>. {RESTART_NOTE} Then run the flow tests and commit '
+              '<code>voice-agent/flows/</code>.</div>' if saved else '')
     body = (f'<h1>Flows</h1><p>Flows are {state}. Each flow is a file in <code>voice-agent/flows/</code>; this page is drawn from those files. '
-            'The order is enforced in code: a step\'s tools are refused until the earlier steps are done.</p>' + ''.join(blocks))
+            'The order is enforced in code: a step\'s tools are refused until the earlier steps are done.</p>' + notice + ''.join(blocks))
     return page('Flows', body, '/flows')
+
+
+def flow_id_checked(value):
+    if not re.fullmatch(r'[a-z][a-z0-9_]{1,40}', value or ''):
+        raise HTTPException(404)
+    try:
+        path = flow_edit.flow_path(FLOWS_DIR, value)
+    except flow_edit.EditError:
+        raise HTTPException(404)
+    return json.loads(path.read_text(encoding='utf-8'))
+
+
+def flow_form(current, proposed, role='', note='', error='', raw_json=None):
+    """Edit form: wording and field options as inputs; the whole flow as JSON under Advanced."""
+    fid = current['id']
+    area = lambda name, value, rows=2: f'<textarea name="{name}" rows="{rows}" class="editor" style="font-family:inherit">{e(value)}</textarea>'
+    top = ''.join(f'<label>{label}{area("flow." + key, proposed.get(key, ""), 1 if key == "title" else 2)}</label>'
+                  for key, label in [('title', 'Title'), ('use_when', 'Start this flow when (the agent sees this)'),
+                                     ('on_success', 'After success, the agent should'), ('on_failure', 'If the action fails, the agent should')])
+    fields = ''.join(
+        f"""<tr><td><b>{e(spec['label'])}</b><div class="muted"><code>{e(name)}</code> · {e(spec['type'])}</div>
+          <input type="hidden" name="field.{e(name)}.present" value="1"></td>
+          <td><input name="field.{e(name)}.label" value="{e(spec['label'])}" size="16"></td>
+          <td><input name="field.{e(name)}.ask" value="{e(spec.get('ask', ''))}" style="width:100%"></td>
+          <td style="text-align:center"><input type="checkbox" name="field.{e(name)}.optional" value="1" {'checked' if spec.get('optional') else ''}></td>
+          <td>{f'<input name="field.{e(name)}.max" value="{e(spec.get("max", ""))}" size="5">' if spec['type'] == 'text' else '–'}</td></tr>"""
+        for name, spec in proposed['fields'].items())
+    steps = ''.join(
+        f"""<div class="fstep {e(step['kind'])}" style="margin-bottom:8px"><div class="kind">{n} · {e(step['kind'])}{' · ' + e(step.get('action')) if step.get('action') else ''}</div>
+          <label>Title<input name="step.{e(step['id'])}.title" value="{e(step['title'])}"></label>
+          <label>Instruction to the agent{area(f"step.{step['id']}.instruction", step['instruction'], 3)}</label></div>"""
+        for n, step in enumerate(proposed['steps'], 1))
+    json_text = raw_json if raw_json is not None else flow_edit.dumps({k: v for k, v in proposed.items() if k not in ('version', 'change_history')})
+    return f"""<div class="toolbar"><a href="/flows">← Flows</a></div><h1>Edit flow: {e(current['title'])}</h1>
+    <p class="muted"><code>{e(fid)}</code> · version {e(current.get('version', '1.0'))} → {e(flow_edit.bump(current.get('version', '1.0')))}.
+    The order of steps and what each needs is enforced in code; this changes the wording and field options. {e(RESTART_NOTE)}</p>
+    {f'<div class="notice" style="background:var(--red-soft);border-color:#e8b4b4">{e(error)}</div>' if error else ''}
+    <form method="post" action="/flows/{e(fid)}/preview" style="display:grid;gap:10px">{token_field()}
+      <input type="hidden" name="version" value="{e(current.get('version', '1.0'))}">
+      <div class="card" style="display:grid;gap:8px"><b>The flow</b>{top}</div>
+      <div class="card"><b>Details collected</b> <span class="muted">(label = shown and read back; "asked as" = how the agent asks)</span>
+        <table style="margin-top:6px"><tr><th>Field</th><th>Label</th><th>Asked as</th><th>Optional</th><th>Max length</th></tr>{fields}</table></div>
+      <div class="card"><b>Steps</b> <span class="muted">(in order)</span><div style="margin-top:8px">{steps}</div></div>
+      <details {'open' if raw_json is not None else ''}><summary>Advanced: edit the whole flow as JSON (add fields or steps, change order)</summary>
+        <p class="muted">Tick the box to use this JSON instead of the form above. The same checks apply.</p>
+        <label style="flex-direction:row;gap:6px"><input type="checkbox" name="use_json" value="1" {'checked' if raw_json is not None else ''}> Use the JSON below</label>
+        <textarea name="json" rows="22" class="editor">{e(json_text)}</textarea></details>
+      <div class="grid2"><label>Approved by (role, not a name) <input name="role" value="{e(role)}" placeholder="e.g. Product owner" required></label>
+        <label>What changed and why <input name="note" value="{e(note)}" placeholder="e.g. Ask for the bed before the hospital" required></label></div>
+      <div class="toolbar"><button>Preview and check</button><a class="btn ghost" href="/flows">Cancel</a></div></form>"""
+
+
+def proposed_flow(current, form):
+    """The edited flow from the submitted form, or (None, raw JSON text, error) when the JSON does not parse."""
+    if form.get('use_json'):
+        raw = str(form.get('json', ''))
+        try:
+            return json.loads(raw), None
+        except ValueError as error:
+            return None, (raw, f'The JSON is not valid: {error}')
+    return flow_edit.from_form(current, form), None
+
+
+@app.get('/flows/{value}/edit')
+async def flow_edit_page(value: str):
+    require_editing()
+    current = flow_id_checked(value)
+    return page(f'Edit {value}', flow_form(current, current), '/flows')
+
+
+@app.post('/flows/{value}/preview')
+async def flow_preview(value: str, request: Request):
+    form = dict((await request.form()).items())
+    check_token(form.get('token'))
+    require_editing()
+    current = flow_id_checked(value)
+    role, note = form.get('role', ''), form.get('note', '')
+    try:
+        new, bad = proposed_flow(current, form)
+    except flow_edit.EditError as error:
+        return page(f'Edit {value}', flow_form(current, current, role, note, str(error)), '/flows')
+    if bad:
+        return page(f'Edit {value}', flow_form(current, current, role, note, bad[1], raw_json=bad[0]), '/flows')
+    try:
+        if form.get('version') != current.get('version', '1.0'):
+            raise flow_edit.EditError('This flow was changed since you opened it; reload and edit again.')
+        change = flow_edit.plan(value, new, role, note, FLOWS_DIR)
+    except flow_edit.EditError as error:
+        if form.get('use_json'):  # draw the form from the saved flow; keep the JSON as typed
+            return page(f'Edit {value}', flow_form(current, current, role, note, str(error), raw_json=str(form.get('json', ''))), '/flows')
+        return page(f'Edit {value}', flow_form(current, new, role, note, str(error)), '/flows')
+    changes = ''.join(f'<tr><td>{e(what)}</td><td class="muted">{e(old)}</td><td>{e(new_value)}</td></tr>'
+                      for what, old, new_value in change['changes'])
+    proposed_json = flow_edit.dumps({k: v for k, v in new.items() if k not in ('version', 'change_history')})
+    body = f"""<div class="toolbar"><a href="/flows">← Flows</a></div><h1>Check the change to {e(current['title'])}</h1>
+    <div class="notice" style="background:var(--green-soft);border-color:#b9dcc6">✓ Checked exactly as the voice agent checks flows when it
+      starts, together with the other flows: every step, field and the ticket action's required details pass.</div>
+    <p class="muted">Version {e(change['old_version'])} → <b>{e(change['version'])}</b> · approved by {e(role)} · “{e(note)}”.
+    The current file is kept as <code>flows/archive/{e(change['archive'].name)}</code>. {e(RESTART_NOTE)}</p>
+    <h2>What changes</h2><table><tr><th>What</th><th>Before</th><th>After</th></tr>{changes}</table>
+    <h2>The flow after the change</h2>{flow_diagram(change['new'])}
+    <details><summary>File differences (JSON)</summary>{diff_html(change['diff'])}</details>
+    <form method="post" action="/flows/{e(value)}/save" class="toolbar" style="margin-top:14px">{token_field()}
+      <input type="hidden" name="version" value="{e(current.get('version', '1.0'))}"><textarea name="json" hidden>{e(proposed_json)}</textarea>
+      <input type="hidden" name="use_json" value="1"><input type="hidden" name="role" value="{e(role)}"><input type="hidden" name="note" value="{e(note)}">
+      <button>Save version {e(change['version'])}</button><button formaction="/flows/{e(value)}/back" class="ghost">Back to editing</button></form>"""
+    return page(f'Check {value}', body, '/flows')
+
+
+@app.post('/flows/{value}/back')
+async def flow_back(value: str, request: Request):
+    form = dict((await request.form()).items())
+    check_token(form.get('token'))
+    require_editing()
+    current = flow_id_checked(value)
+    try:
+        proposed = json.loads(form.get('json', ''))
+    except ValueError:
+        proposed = current
+    return page(f'Edit {value}', flow_form(current, proposed, form.get('role', ''), form.get('note', '')), '/flows')
+
+
+@app.post('/flows/{value}/save')
+async def flow_save(value: str, request: Request):
+    form = dict((await request.form()).items())
+    check_token(form.get('token'))
+    require_editing()
+    current = flow_id_checked(value)
+    try:
+        new = json.loads(form.get('json', ''))
+        flow_edit.save(value, new, form.get('role', ''), form.get('note', ''), FLOWS_DIR, expected_version=form.get('version'))
+    except (ValueError, flow_edit.EditError) as error:
+        return page(f'Edit {value}', flow_form(current, current, form.get('role', ''), form.get('note', ''), str(error)), '/flows')
+    return RedirectResponse(f'/flows?saved={value}', status_code=303)
 
 
 @app.get('/knowledge')
@@ -1390,7 +1554,7 @@ async def knowledge_source(value: str, saved: str = ''):
         tests = (f'<form method="post" action="/tests/run" class="inline">{token_field()}<input type="hidden" name="only" value="{e(ids)}">'
                  f'<button>Run the {min(len(scenarios), 12)} related scenario{"s" if len(scenarios) != 1 else ""}</button></form>')
     body = f"""<div class="toolbar"><a href="/knowledge">← Knowledge</a><span style="flex:1"></span>
-      {f'<a class="btn" href="/knowledge/{e(item["id"])}/edit">Edit</a>' if path else ''}</div>
+      {f'<a class="btn" href="/knowledge/{e(item["id"])}/edit">Edit</a>' if path and EDITING else ''}</div>
     <h1>{e(item.get('name', item['id']))}</h1>
     <p class="muted"><code>{e(item['id'])}</code> · version {e(item['version'])} · {f'<span class="pill info">{e(mode)}</span>' if mode else '<span class="pill grey">not used by the agent</span>'}
       · {e(item['readiness'])} · {'<span class="pill ok">fingerprint matches</span>' if ok else '<span class="pill bad">fingerprint does not match: calls are refused</span>'}</p>
@@ -1429,6 +1593,7 @@ def edit_form(item, text, description, role='', note='', error=''):
 
 @app.get('/knowledge/{value}/edit')
 async def knowledge_edit_page(value: str):
+    require_editing()
     item = knowledge_item(value)
     path = knowledge_edit.content_path(LIBRARY, item)
     return page(f'Edit {item["id"]}', edit_form(item, path.read_text(encoding='utf-8'), item.get('description', '')), '/knowledge')
@@ -1438,6 +1603,7 @@ async def knowledge_edit_page(value: str):
 async def knowledge_preview(value: str, token: str = Form(''), version: str = Form(''), text: str = Form(''),
                             description: str = Form(''), role: str = Form(''), note: str = Form('')):
     check_token(token)
+    require_editing()
     item = knowledge_item(value)
     try:
         if version != item['version']:
@@ -1472,6 +1638,7 @@ async def knowledge_preview(value: str, token: str = Form(''), version: str = Fo
 async def knowledge_back(value: str, token: str = Form(''), text: str = Form(''), description: str = Form(''),
                          role: str = Form(''), note: str = Form('')):
     check_token(token)
+    require_editing()
     item = knowledge_item(value)
     return page(f'Edit {item["id"]}', edit_form(item, text, description, role, note), '/knowledge')
 
@@ -1480,6 +1647,7 @@ async def knowledge_back(value: str, token: str = Form(''), text: str = Form('')
 async def knowledge_save(value: str, token: str = Form(''), version: str = Form(''), text: str = Form(''),
                          description: str = Form(''), role: str = Form(''), note: str = Form('')):
     check_token(token)
+    require_editing()
     item = knowledge_item(value)
     try:
         knowledge_edit.save(item['id'], text, description, role, note, LIBRARY, expected_version=version)
@@ -1653,7 +1821,7 @@ async def issue_page(value: str, saved: str = ''):
     scen_options = '<option value="">none</option>' + ''.join(
         f'<option {"selected" if s == issue["scenario"] else ""}>{e(s)}</option>' for s in scenario_ids())
     make = (f'<form class="inline" method="post" action="/issues/{e(issue["id"])}/scenario">{token_field()}'
-            f'<button class="ghost">Make a scenario from this call</button></form>' if issue.get('call_file') and not issue['scenario'] else '')
+            f'<button class="ghost">Make a scenario from this call</button></form>' if issue.get('call_file') and not issue['scenario'] and EDITING else '')
     run = (f'<form class="inline" method="post" action="/issues/{e(issue["id"])}/test">{token_field()}'
            f'<button>Run {e(issue["scenario"])} now (≈2¢)</button></form>' if issue['scenario'] else '')
     history = ''.join(f'<li><span class="muted">{when(h["at"])}</span> {e(h["change"])}</li>' for h in reversed(issue['history']))
@@ -1705,6 +1873,7 @@ async def issue_save(value: str, token: str = Form(''), status: str = Form(''), 
 @app.post('/issues/{value}/scenario')
 async def issue_scenario(value: str, token: str = Form('')):
     check_token(token)
+    require_editing()
     issue = issue_store.get(issue_store.load(), issue_id(value))
     if issue is None or not issue.get('call_file'):
         raise HTTPException(404)
@@ -1794,7 +1963,7 @@ REPO = HERE.parent
 DOC_GROUPS = [
     ('Training and testing', ['staff-testing.md', 'testing.md']),
     ('How it works', ['technical-reference.pdf', 'flows.md', 'knowledge.md', 'voice-agent.md', 'knowledge-library.md', 'mock-backend.md']),
-    ('Rules, decisions and plans', ['business-rules.md', 'issue-register.csv', 'deployment-plan.md', 'overview.md']),
+    ('Rules, decisions and plans', ['business-rules.md', 'issue-register.csv', 'deployment-plan.md', 'home-server.md', 'overview.md']),
 ]
 EXPECT_TEXT = {'tools_called': 'Must use', 'tools_not_called': 'Must not use', 'said_any': 'Must say one of',
                'said_none': 'Must never say', 'ticket_args': 'Ticket details must include'}
@@ -1980,12 +2149,17 @@ def main():
     if '--port' in sys.argv:  # e.g. run a branch's dashboard next to the main one: --port 8103
         PORT = int(sys.argv[sys.argv.index('--port') + 1])
         ALLOWED_HOSTS = {f'{HOST}:{PORT}', f'localhost:{PORT}'}
+    # In a container, listen on all of the container's interfaces (--container). The compose file
+    # publishes the port on the server's 127.0.0.1 only, and the Host check still only accepts
+    # localhost / 127.0.0.1, so it is reached through an SSH tunnel, never through Cloudflare.
+    bind = '0.0.0.0' if '--container' in sys.argv else HOST
     if sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
         sys.stdout.reconfigure(encoding='utf-8')
-    print(f'Dashboard: http://{HOST}:{PORT}  (this PC only; Ctrl+C to stop)', flush=True)
-    if '--no-browser' not in sys.argv:
+    print(f'Dashboard: http://{HOST}:{PORT}  (this machine only; Ctrl+C to stop)'
+          + ('' if EDITING else '  · knowledge, flow and scenario editing off'), flush=True)
+    if '--no-browser' not in sys.argv and '--container' not in sys.argv:
         webbrowser.open(f'http://{HOST}:{PORT}')
-    uvicorn.run(app, host=HOST, port=PORT, log_level='warning')
+    uvicorn.run(app, host=bind, port=PORT, log_level='warning')
 
 
 if __name__ == '__main__':

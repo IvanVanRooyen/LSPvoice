@@ -1,0 +1,14 @@
+# Keep the build context small and free of anything private.
+.git
+**/.venv
+**/__pycache__
+**/*.pyc
+build
+private-config
+data
+.env
+*.jsonl
+scripts
+mock-backend/*
+!mock-backend/private_files.py
+!mock-backend/static_inventory.py

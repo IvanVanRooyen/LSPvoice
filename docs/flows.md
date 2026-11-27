@@ -38,7 +38,22 @@ direct `create_ticket` tool, which is useful for comparisons in the test harness
 The dashboard's **Flows** page draws this from the file. `python flows.py --diagram log_ticket`
 prints a Mermaid diagram for documents.
 
-## Adding or changing a flow
+## Changing a flow in the dashboard
+
+Flows → **Edit**. The form changes the wording (what the agent is told at each step, how each
+detail is asked for, labels used in the read-back), whether a detail is optional and its length
+limit. "Advanced" edits the whole flow as JSON (add fields or steps, change the order).
+**Preview and check** validates the result exactly as the agent does at start-up, together with
+the other flows, and shows what changes and the new drawing. The checks include what each action
+needs: the ticket flow must ask for hospital, bed or Device ID, name, an Australian callback
+number and the problem, as required details, before the confirm step.
+
+**Save** keeps the previous file in `voice-agent/flows/archive/`, and writes the flow with a
+`version` and a `change_history` line (approved by role, with a note). The voice agent reads
+flows when it starts, so **restart `run.ps1`** for calls to use the new version, run the `flow`
+and `tickets` scenarios, and commit `voice-agent/flows/`.
+
+## Adding a new flow
 
 1. Copy an existing file in `voice-agent/flows/` and edit the fields, steps and wording. Keep
    instructions short and spoken-style; one question at a time.

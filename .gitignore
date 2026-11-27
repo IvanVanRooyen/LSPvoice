@@ -11,3 +11,6 @@ build/
 private-config/
 *.jsonl
 .env
+
+# Server data folder for the containers (docs/home-server.md)
+/data/

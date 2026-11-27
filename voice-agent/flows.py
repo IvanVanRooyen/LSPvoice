@@ -28,6 +28,10 @@ FLOWS_DIR = Path(__file__).resolve().parent / 'flows'
 KINDS = {'collect', 'confirm', 'action'}
 TYPES = {'text', 'au_phone', 'boolean'}
 ACTION_NAMES = {'create_ticket'}
+# What each action needs collected (required, before the confirm step), matching tickets.problems().
+ACTION_NEEDS = {'create_ticket': {'fields': {'hospital': 'text', 'caller_name': 'text', 'callback_number': 'au_phone',
+                                             'issue_summary': 'text'},
+                                  'either': ('bed_id', 'device_id')}}
 
 
 class FlowError(ValueError):
@@ -44,13 +48,28 @@ def validate_definition(flow, actions=ACTION_NAMES):
     for name, spec in fields.items():
         if spec.get('type') not in TYPES:
             raise FlowError(f'{fid}: field {name} has unknown type {spec.get("type")}')
-    seen_confirm = False
+        if not str(spec.get('label', '')).strip() or not str(spec.get('ask', '')).strip():
+            raise FlowError(f'{fid}: field {name} needs a label and an "ask" wording')
+        if 'max' in spec and not (isinstance(spec['max'], int) and 1 <= spec['max'] <= 2000):
+            raise FlowError(f'{fid}: field {name} max must be a whole number from 1 to 2000')
+    seen_confirm, step_ids, collected = False, set(), {}
     for step in flow['steps']:
         if step.get('kind') not in KINDS:
             raise FlowError(f'{fid}: step {step.get("id")} has unknown kind')
+        if not step.get('id') or step['id'] in step_ids:
+            raise FlowError(f'{fid}: every step needs its own id ({step.get("id")!r} is missing or repeated)')
+        step_ids.add(step['id'])
+        if not str(step.get('title', '')).strip() or not str(step.get('instruction', '')).strip():
+            raise FlowError(f'{fid}: step {step["id"]} needs a title and an instruction')
         for name in step.get('fields', []) + step.get('also', []) + step.get('one_of', []):
             if name not in fields:
                 raise FlowError(f'{fid}: step {step["id"]} uses unknown field {name}')
+        if step['kind'] == 'collect':
+            if not step.get('fields') and not step.get('one_of'):
+                raise FlowError(f'{fid}: collect step {step["id"]} must ask for at least one field')
+            if not seen_confirm:
+                collected.update({n: 'required' for n in step.get('fields', [])})
+                collected.update({n: 'one_of' for n in step.get('one_of', [])})
         if step['kind'] == 'confirm':
             seen_confirm = True
         if step['kind'] == 'action':
@@ -58,6 +77,14 @@ def validate_definition(flow, actions=ACTION_NAMES):
                 raise FlowError(f'{fid}: unknown action {step.get("action")}')
             if not seen_confirm:
                 raise FlowError(f'{fid}: an action step must come after a confirm step')
+            needs = ACTION_NEEDS.get(step['action'], {})
+            for name, kind in needs.get('fields', {}).items():
+                if collected.get(name) != 'required' or fields[name].get('optional') or fields[name]['type'] != kind:
+                    raise FlowError(f'{fid}: {step["action"]} needs {name} ({kind}) asked for as a required field before the confirm step')
+            either = needs.get('either')
+            if either and not (any(collected.get(n) == 'required' and not fields[n].get('optional') for n in either)
+                               or all(collected.get(n) for n in either)):
+                raise FlowError(f'{fid}: {step["action"]} needs {" or ".join(either)} asked for before the confirm step')
     for key in ('title', 'use_when', 'on_success', 'on_failure'):
         if not flow.get(key):
             raise FlowError(f'{fid}: missing {key}')

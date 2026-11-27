@@ -1,0 +1,63 @@
+# LSPcare voice agent on one server: agent + Cloudflare named tunnel + dashboard.
+# Setup and operation: docs/home-server.md. Settings come from .env (copy .env.example).
+#
+#   GIT_COMMIT=$(git rev-parse --short HEAD) docker compose up -d --build
+name: lspvoice
+
+x-image: &image
+  build:
+    context: .
+    args:
+      GIT_COMMIT: ${GIT_COMMIT:-unknown}
+  image: lspvoice:${GIT_COMMIT:-unknown}
+
+x-hardening: &hardening
+  read_only: true          # the code cannot be changed at run time; data goes to /data only
+  tmpfs: [/tmp]
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  environment:
+    TZ: ${TZ:-Australia/Adelaide}
+  volumes:
+    - ${LSPCARE_DATA:-./data}/private:/data/private   # credentials, inventory, transcripts, reviews, issues
+    - ${LSPCARE_DATA:-./data}/runs:/data/runs         # test-run results
+
+services:
+  agent:
+    <<: [*image, *hardening]
+    restart: unless-stopped
+    expose: ["8101"]       # reachable by the tunnel container only; nothing is published on the server
+
+  cloudflared:
+    # Named tunnel: its public hostname and the route to http://agent:8101 are set in the
+    # Cloudflare dashboard; the token is the only thing this server holds.
+    image: cloudflare/cloudflared:latest   # pin a version tag once it works
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:?set TUNNEL_TOKEN in .env}
+    restart: unless-stopped
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    depends_on:
+      agent:
+        condition: service_healthy
+
+  dashboard:
+    <<: [*image, *hardening]
+    command: ["python", "dashboard.py", "--container"]
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ:-Australia/Adelaide}
+      LSPCARE_AGENT_HEALTH: http://agent:8101/health
+      LSPCARE_EDITING: "off"   # knowledge/flows/scenarios are part of the image: edit on a PC, commit, rebuild
+    # Published on the server's loopback only. Reach it through SSH:
+    #   ssh -L 8102:127.0.0.1:8102 <server>   then open http://localhost:8102
+    ports: ["127.0.0.1:8102:8102"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8102/', timeout=4)"]
+      interval: 60s
+      timeout: 6s
+      retries: 3
+    depends_on:
+      agent:
+        condition: service_healthy
