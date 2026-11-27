@@ -18,11 +18,11 @@ import re
 import secrets
 import statistics
 import sys
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 from urllib.request import urlopen
 import webbrowser
 
-from fastapi import FastAPI, Form, HTTPException, Request
+from fastapi import FastAPI, Form, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 
 import configure
@@ -116,6 +116,11 @@ details{background:#fff;border:1px solid var(--line);border-radius:8px;padding:8
 .prose{background:#fff;border:1px solid var(--line);border-radius:8px;padding:8px 26px 18px;line-height:1.55;max-width:960px}
 .prose table{margin:10px 0}.prose code{background:var(--soft);padding:0 4px;border-radius:4px}
 iframe.viewer{width:100%;height:calc(100vh - 150px);border:1px solid var(--line);border-radius:8px;background:#fff}
+.filters label{flex-direction:row;align-items:center;gap:4px}
+.trends{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px;margin:10px 0}
+.trend .big{font-size:22px;font-weight:700;margin:2px 0}.spark{width:100%;height:auto;display:block;margin-top:6px}
+.spark .ax{font-size:10px;fill:var(--muted)}.spark .hit.on{fill:#14213d0d}
+.tip{position:absolute;z-index:20;background:#14213d;color:#fff;font-size:12px;padding:4px 8px;border-radius:6px;pointer-events:none;white-space:nowrap}
 .live-head{display:flex;align-items:center;gap:12px}.empty{padding:28px;text-align:center;color:var(--muted);background:#fff;border:1px dashed var(--line);border-radius:8px}
 """
 
@@ -452,8 +457,141 @@ def start_job(title, command):
 
 # ------------------------------------------------------------------ pages
 
+# ------------------------------------------------------------------ trends
+
+TREND_DAYS = (14, 30, 90)
+
+
+def trends(rows, runs, days, today=None):
+    """Per-day figures for the last `days` days: calls, average first word, AI cost per call; and test pass rates."""
+    from datetime import date, timedelta
+    today = today or date.today()
+    span = [today - timedelta(days=n) for n in range(days - 1, -1, -1)]
+    per_day = {d.isoformat(): {'calls': 0, 'firsts': [], 'costs': []} for d in span}
+    for r in rows:
+        day = per_day.get(r['at'][:10])
+        if day is None:
+            continue
+        s = transcripts.stats(r['records'])
+        day['calls'] += 1
+        day['firsts'] += s['first_words_ms']
+        if s['tokens']:
+            day['costs'].append(usd(s['by_model']))
+    out = []
+    for d in span:
+        v = per_day[d.isoformat()]
+        out.append({'day': d, 'calls': v['calls'],
+                    'first_ms': round(sum(v['firsts']) / len(v['firsts'])) if v['firsts'] else None,
+                    'cost': sum(v['costs']) / len(v['costs']) if v['costs'] else None, 'costed': len(v['costs'])})
+    first = span[0].isoformat()
+    tests = [{'name': r['name'], 'when': r['data']['settings'].get('started', ''), 'passed': r['passed'], 'total': r['total'],
+              'rate': r['passed'] / r['total'] if r['total'] else None}
+             for r in reversed(runs) if r['data']['settings'].get('started', '')[:10] >= first]
+    return out, tests
+
+
+def day_label(d):
+    return f'{d.day} {d.strftime("%b")}'
+
+
+def spark(points, kind, fmt, reference=None, reference_label='', ceiling=None):
+    """Small single-series SVG chart. points: [(label, value or None, tooltip)]. kind: 'bar', 'line' or 'dots'.
+    ceiling fixes the top of the scale (e.g. 100 for percentages)."""
+    w, h, left, right, top, bottom = 320, 132, 36, 6, 10, 108
+    values = [v for _, v, _ in points if v is not None]
+    if not values:
+        return '<div class="empty" style="padding:30px 10px">No data in this period yet.</div>'
+    top_value = max(values + ([reference] if reference is not None else []))
+    top_value = ceiling or (top_value * 1.15 if top_value > 0 else 1)
+    n = len(points)
+    step = (w - left - right) / max(n, 1)
+    x = lambda i: left + step * i + step / 2
+    y = lambda v: bottom - (bottom - top) * (v / top_value)
+    parts = [f'<line x1="{left}" y1="{bottom}" x2="{w - right}" y2="{bottom}" stroke="#c4cad6" stroke-width="1"/>',
+             f'<text x="{left - 5}" y="{top + 4}" text-anchor="end" class="ax">{e(fmt(top_value))}</text>',
+             f'<text x="{left - 5}" y="{bottom}" text-anchor="end" class="ax">0</text>']
+    if reference is not None:
+        parts.append(f'<line x1="{left}" y1="{y(reference):.1f}" x2="{w - right}" y2="{y(reference):.1f}" stroke="#8a93a5" '
+                     f'stroke-width="1" stroke-dasharray="4 3"/><text x="{left + 4}" y="{y(reference) - 4:.1f}" text-anchor="start" '
+                     f'class="ax">{e(reference_label)}</text>')
+    if kind == 'bar':
+        width = min(step - 2, 16)
+        for i, (_, v, _) in enumerate(points):
+            if v:
+                top_y = y(v)
+                parts.append(f'<rect x="{x(i) - width / 2:.1f}" y="{top_y:.1f}" width="{width:.1f}" height="{bottom - top_y:.1f}" '
+                             f'rx="2" fill="var(--teal)"/>')
+    else:
+        if kind == 'line':
+            segment = []
+            for i, (_, v, _) in enumerate(points + [(None, None, None)]):
+                if v is None:
+                    if len(segment) > 1:
+                        parts.append(f'<polyline fill="none" stroke="var(--teal)" stroke-width="2" stroke-linejoin="round" '
+                                     f'points="{" ".join(segment)}"/>')
+                    segment = []
+                else:
+                    segment.append(f'{x(i):.1f},{y(v):.1f}')
+        for i, (_, v, _) in enumerate(points):
+            if v is not None:
+                parts.append(f'<circle cx="{x(i):.1f}" cy="{y(v):.1f}" r="4" fill="var(--teal)" stroke="#fff" stroke-width="2"/>')
+    parts.append(f'<text x="{x(0):.1f}" y="{h - 8}" text-anchor="start" class="ax">{e(points[0][0])}</text>'
+                 f'<text x="{x(n - 1):.1f}" y="{h - 8}" text-anchor="end" class="ax">{e(points[-1][0])}</text>')
+    for i, (_, _, tip) in enumerate(points):  # hover targets: the whole column, wider than the mark
+        parts.append(f'<rect x="{left + step * i:.1f}" y="{top}" width="{step:.1f}" height="{bottom - top}" fill="transparent" '
+                     f'class="hit" data-tip="{e(tip)}"><title>{e(tip)}</title></rect>')
+    return f'<svg viewBox="0 0 {w} {h}" class="spark" role="img">{"".join(parts)}</svg>'
+
+
+def trends_html(rows, runs, days):
+    data, tests = trends(rows, runs, days)
+    calls_total = sum(d['calls'] for d in data)
+    all_firsts = [d['first_ms'] for d in data if d['first_ms'] is not None]
+    costed = [(d['cost'], d['costed']) for d in data if d['cost'] is not None]
+    avg_cost = sum(c * n for c, n in costed) / sum(n for _, n in costed) if costed else None
+    rates = [t['rate'] for t in tests if t['rate'] is not None]
+    charts = [
+        ('Calls per day', f'{calls_total}', f'calls in {days} days',
+         spark([(day_label(d['day']), d['calls'], f"{day_label(d['day'])}: {d['calls']} call{'s' if d['calls'] != 1 else ''}") for d in data],
+               'bar', lambda v: f'{v:.0f}')),
+        ('Average time to first word', seconds_text(round(sum(all_firsts) / len(all_firsts))) if all_firsts else '–',
+         f'average of daily averages · dashed line = {SLOW_MS / 1000:.1f} s',
+         spark([(day_label(d['day']), d['first_ms'], f"{day_label(d['day'])}: " + (seconds_text(d['first_ms']) if d['first_ms'] else 'no calls'))
+                for d in data], 'line', lambda v: f'{v / 1000:.1f} s', SLOW_MS, f'{SLOW_MS / 1000:.1f} s')),
+        ('AI cost per call', f'US${avg_cost:.3f}' if avg_cost is not None else '–',
+         'list price, AI only · recorded from the token-usage version on',
+         spark([(day_label(d['day']), d['cost'], f"{day_label(d['day'])}: " + (f"US${d['cost']:.3f} per call ({d['costed']} costed)" if d['cost'] is not None else 'no costed calls'))
+                for d in data], 'line', lambda v: f'${v:.2f}')),
+        ('Test pass rate', f'{rates[-1] * 100:.0f}%' if rates else '–', 'latest run · each dot is one run (scenario sets can differ)',
+         spark([(t['when'][5:10].replace('-', '/'), t['rate'] * 100 if t['rate'] is not None else None,
+                 f"{t['when']}: {t['passed']}/{t['total']} passed") for t in tests] or [('', None, '')],
+               'dots', lambda v: f'{v:.0f}%', ceiling=100)),
+    ]
+    cards = ''.join(f'<div class="card trend"><div class="lbl">{e(title)}</div><div class="big">{value}</div>'
+                    f'<div class="lbl">{e(note)}</div>{chart}</div>' for title, value, note, chart in charts)
+    table = ''.join(f"<tr><td>{day_label(d['day'])}</td><td>{d['calls']}</td><td>{seconds_text(d['first_ms'])}</td>"
+                    f"<td>{'–' if d['cost'] is None else f'US${d['cost']:.3f}'}</td></tr>"
+                    for d in reversed(data) if d['calls'])
+    picker = ''.join(f'<a class="btn {"" if n == days else "ghost"}" href="/?days={n}">{n} days</a>' for n in TREND_DAYS)
+    return f"""<div class="toolbar" style="margin-top:22px"><h2 style="margin:0">Trends</h2><span style="flex:1"></span>{picker}</div>
+    <div class="trends">{cards}</div>
+    <details><summary>Daily figures as a table</summary><table><tr><th>Day</th><th>Calls</th><th>Avg first word</th><th>AI cost per call</th></tr>
+    {table or '<tr><td colspan="4" class="muted">No calls in this period.</td></tr>'}</table></details>
+    <div id="tip" class="tip" hidden></div>
+    <script>
+    const tip = document.getElementById('tip');
+    document.querySelectorAll('.spark .hit').forEach(el => {{
+      el.addEventListener('mousemove', ev => {{ tip.hidden = false; tip.textContent = el.dataset.tip;
+        tip.style.left = (ev.pageX + 12) + 'px'; tip.style.top = (ev.pageY - 30) + 'px'; el.classList.add('on'); }});
+      el.addEventListener('mouseleave', () => {{ tip.hidden = true; el.classList.remove('on'); }});
+      el.querySelector('title').remove();
+    }});
+    </script>"""
+
+
 @app.get('/')
-async def overview():
+async def overview(days: int = 14):
+    days = days if days in TREND_DAYS else 14
     status = await asyncio.to_thread(pilot_status)
     cfg = read_config()
     rows = calls()
@@ -494,41 +632,163 @@ async def overview():
       <a class="btn" style="background:var(--amber)" href="/issues">Triage issues</a>
       <form class="inline" method="post" action="/reviews/run">{token_field()}<button>Review new calls</button></form>
       <a class="btn" style="background:var(--navy)" href="/tests">Run tests</a></div></div>
+    {trends_html(rows, runs, days)}
     <h2>Latest calls</h2>{calls_table(rows[:8])}"""
     return page('Overview', body, '/')
 
 
-def calls_table(rows):
-    if not rows:
-        return '<p class="muted">No saved calls yet. Calls are saved while <code>transcripts</code> is on.</p>'
-    lines, live = [], active_call()
+def with_stats(rows):
+    """Adds each call's figures (and AI cost, when recorded) to its row, once."""
     for r in rows:
-        s = transcripts.stats(r['records'])
+        if 'stats' not in r:
+            r['stats'] = transcripts.stats(r['records'])
+            r['cost'] = usd(r['stats']['by_model']) if r['stats']['tokens'] else None
+    return rows
+
+
+def calls_table(rows, sort_link=None):
+    if not rows:
+        return '<div class="empty">No calls match. Calls are saved while <code>transcripts</code> is on.</div>'
+    lines, live = [], active_call()
+    for r in with_stats(rows):
+        s = r['stats']
         slow = s['first_word_avg_ms'] and s['first_word_avg_ms'] > SLOW_MS
         ticket = f"#{e(s['ticket']['number'])}" if s['ticket'] else '<span class="muted">–</span>'
         lines.append(f"""<tr style="cursor:pointer" onclick="location.href='{call_url(r['file'])}'"><td><a href="{call_url(r['file'])}">{when(r['at'])}</a></td>
         <td><b>{e(r['reference'] or '–')}</b></td><td>…{e(r['caller'] or '???')}</td><td>{duration_text(s['duration_s'])}</td><td>{r['turns']}</td>
         <td class="{'warn' if slow else ''}">{seconds_text(s['first_word_avg_ms'])}</td><td>{ticket}</td>
+        <td>{'–' if r['cost'] is None else f"${r['cost']:.3f}"}</td>
         <td>{'<span class="pill bad">● live</span>' if live and live.name == r['file'] else e(r['ended'] or 'hung up')}</td><td>{call_status(r)}</td>
         <td class="muted">{e((r['version'] or {}).get('code', ''))}</td></tr>""")
-    return ('<table><tr><th>When</th><th>Ref</th><th>Caller</th><th>Length</th><th>Turns</th><th>Avg first word</th><th>Ticket</th>'
-            f'<th>Ended</th><th>Status</th><th>Version</th></tr>{"".join(lines)}</table>')
+    head = lambda key, label: sort_link(key, label) if sort_link and key else label
+    columns = [('when', 'When'), (None, 'Ref'), (None, 'Caller'), ('length', 'Length'), ('turns', 'Turns'),
+               ('first', 'Avg first word'), (None, 'Ticket'), ('cost', 'AI cost'), (None, 'Ended'), (None, 'Status'), (None, 'Version')]
+    return f'<table><tr>{"".join(f"<th>{head(k, label)}</th>" for k, label in columns)}</tr>{"".join(lines)}</table>'
+
+
+CALL_FILTERS = ('q', 'range', 'start', 'end', 'show', 'ticket', 'speed', 'ended', 'version', 'sort', 'dir')
+SHOW = [('all', 'All calls'), ('attention', 'Needs attention'), ('unreviewed', 'Not reviewed'), ('reported', 'Problem reported'),
+        ('issues', 'Has open issues')]
+RANGES = [('', 'Any time'), ('today', 'Today'), ('7', 'Last 7 days'), ('30', 'Last 30 days')]
+SORTS = {'when': lambda r: r['at'], 'length': lambda r: r['stats']['duration_s'] or 0, 'turns': lambda r: r['turns'],
+         'first': lambda r: r['stats']['first_word_avg_ms'] or 0, 'cost': lambda r: r['cost'] or 0}
+PAGE_SIZE = 25
+
+
+def filter_calls(rows, f):
+    """Applies the Calls page filters (a dict of query values) and sort; returns the matching rows."""
+    from datetime import date, timedelta
+    rows = with_stats(rows)
+    q = f.get('q', '').strip().lower()
+    if q:
+        def said(r):
+            return any(q in str(x.get('text', '')).lower() for x in r['records'] if x.get('kind') in ('caller', 'agent', 'greeting'))
+        rows = [r for r in rows if q in (r['reference'], r['caller']) or q == r['file'][:8] or said(r)]
+    start, end = f.get('start', ''), f.get('end', '')
+    if f.get('range') == 'today':
+        start = end = date.today().isoformat()
+    elif f.get('range') in ('7', '30'):
+        start, end = (date.today() - timedelta(days=int(f['range']) - 1)).isoformat(), ''
+    if re.fullmatch(r'\d{4}-\d{2}-\d{2}', start or ''):
+        rows = [r for r in rows if r['at'][:10] >= start]
+    if re.fullmatch(r'\d{4}-\d{2}-\d{2}', end or ''):
+        rows = [r for r in rows if r['at'][:10] <= end]
+    show = f.get('show', 'all')
+    if show == 'attention':
+        rows = [r for r in rows if r['flagged'] or (r['review'] and r['review']['issues'])]
+    elif show == 'unreviewed':
+        rows = [r for r in rows if r['review'] is None]
+    elif show == 'reported':
+        rows = [r for r in rows if r['flagged']]
+    elif show == 'issues':
+        open_calls = {i.get('call_file') for i in issue_store.load()['issues'] if i['status'] in issue_store.ACTIVE}
+        rows = [r for r in rows if r['file'] in open_calls]
+    if f.get('ticket') in ('yes', 'no'):
+        rows = [r for r in rows if bool(r['stats']['ticket']) == (f['ticket'] == 'yes')]
+    if f.get('speed') == 'slow':
+        rows = [r for r in rows if (r['stats']['first_word_avg_ms'] or 0) > SLOW_MS]
+    if f.get('ended'):
+        rows = [r for r in rows if (r['ended'] or 'hung up') == f['ended']]
+    if f.get('version'):
+        rows = [r for r in rows if (r['version'] or {}).get('code') == f['version']]
+    key = SORTS.get(f.get('sort'), SORTS['when'])
+    return sorted(rows, key=key, reverse=f.get('dir', 'desc') != 'asc')
 
 
 @app.get('/calls')
-async def calls_page(q: str = '', show: str = 'all'):
-    rows = calls()
-    if q:
-        rows = [r for r in rows if q.strip() in (r['reference'], r['caller'])]
-    if show == 'attention':
-        rows = [r for r in rows if r['flagged'] or (r['review'] and r['review']['issues'])]
-    if show == 'unreviewed':
-        rows = [r for r in rows if r['review'] is None]
-    body = f"""<h1>Calls</h1><form method="get" style="margin:10px 0">
-      <input name="q" value="{e(q)}" placeholder="Reference or caller digits"> <select name="show">
-      {''.join(f'<option value="{v}" {"selected" if v == show else ""}>{t}</option>' for v, t in [('all', 'All calls'), ('attention', 'Needs attention'), ('unreviewed', 'Not reviewed')])}
-      </select> <button class="secondary">Filter</button></form>{calls_table(rows)}"""
+async def calls_page(request: Request, page_number: int = Query(1, alias='page')):
+    f = {k: request.query_params.get(k, '') for k in CALL_FILTERS}
+    everything = calls()
+    rows = filter_calls(everything, f)
+    pages = max(1, -(-len(rows) // PAGE_SIZE))
+    page_number = min(max(1, page_number), pages)
+    shown = rows[(page_number - 1) * PAGE_SIZE: page_number * PAGE_SIZE]
+
+    def link(**changes):
+        values = {**{k: v for k, v in f.items() if v}, **changes}
+        return '/calls?' + urlencode({k: v for k, v in values.items() if v not in ('', None)})
+
+    def sort_link(key, label):
+        current = (f.get('sort') or 'when') == key
+        direction = 'asc' if current and f.get('dir', 'desc') != 'asc' else 'desc'
+        arrow = (' ▲' if f.get('dir') == 'asc' else ' ▼') if current else ''
+        return f'<a href="{e(link(sort=key, dir=direction, page=""))}" style="color:inherit">{e(label)}{arrow}</a>'
+
+    def select(name, options):
+        return (f'<select name="{name}">' + ''.join(f'<option value="{e(v)}" {"selected" if f.get(name, "") == v else ""}>{e(t)}</option>'
+                                                    for v, t in options) + '</select>')
+    versions = sorted({(r['version'] or {}).get('code', '') for r in everything} - {''}, reverse=True)
+    endings = sorted({r['ended'] or 'hung up' for r in everything})
+    s_list = [r['stats'] for r in rows]
+    firsts = [s['first_word_avg_ms'] for s in s_list if s['first_word_avg_ms'] is not None]
+    costs = [r['cost'] for r in rows if r['cost'] is not None]
+    total_s = sum(s['duration_s'] or 0 for s in s_list)
+    summary = (f'<b>{len(rows)}</b> of {len(everything)} calls · {total_s // 60} min in total · avg first word '
+               f'{seconds_text(round(sum(firsts) / len(firsts))) if firsts else "–"} · {sum(1 for s in s_list if s["ticket"])} tickets'
+               + (f' · AI cost US${sum(costs):.2f} ({len(costs)} costed)' if costs else ''))
+    quick = ''.join(f'<a class="btn {"" if f.get("range", "") == v and not f.get("start") and not f.get("end") else "ghost"}" '
+                    f'href="{e(link(range=v, start="", end="", page=""))}">{e(t)}</a>' for v, t in RANGES)
+    active_filters = any(f.get(k) for k in CALL_FILTERS if k not in ('sort', 'dir'))
+    pager = ''
+    if pages > 1:
+        pager = ('<div class="toolbar" style="justify-content:center;margin-top:10px">'
+                 + (f'<a class="btn ghost" href="{e(link(page=page_number - 1))}">← Newer</a>' if page_number > 1 else '')
+                 + f'<span class="muted">page {page_number} of {pages}</span>'
+                 + (f'<a class="btn ghost" href="{e(link(page=page_number + 1))}">Older →</a>' if page_number < pages else '') + '</div>')
+    body = f"""<h1>Calls</h1>
+    <div class="toolbar">{quick}<span style="flex:1"></span><a class="btn ghost" href="{e('/calls.csv' + link(page='')[len('/calls'):])}" title="The calls matching these filters">Export CSV</a></div>
+    <form method="get" class="toolbar filters">
+      <input name="q" value="{e(f['q'])}" placeholder="Reference, caller digits or words said" size="30">
+      <label>From <input type="date" name="start" value="{e(f['start'])}"></label><label>To <input type="date" name="end" value="{e(f['end'])}"></label>
+      {select('show', SHOW)}{select('ticket', [('', 'Ticket: any'), ('yes', 'Ticket logged'), ('no', 'No ticket')])}
+      {select('speed', [('', 'Speed: any'), ('slow', f'Slow (over {SLOW_MS / 1000:.1f} s)')])}
+      {select('ended', [('', 'Ended: any')] + [(x, x) for x in endings])}
+      {select('version', [('', 'Version: any')] + [(x, x) for x in versions])}
+      <input type="hidden" name="sort" value="{e(f['sort'])}"><input type="hidden" name="dir" value="{e(f['dir'])}">
+      <button class="secondary">Filter</button>{' <a href="/calls">clear</a>' if active_filters else ''}</form>
+    <p class="muted" style="margin:8px 0">{summary}</p>
+    {calls_table(shown, sort_link)}{pager}"""
     return page('Calls', body, '/calls')
+
+
+@app.get('/calls.csv')
+async def calls_csv(request: Request):
+    import csv
+    import io
+    f = {k: request.query_params.get(k, '') for k in CALL_FILTERS}
+    out = io.StringIO()
+    writer = csv.writer(out)
+    writer.writerow(['started', 'reference', 'caller_digits', 'length_s', 'caller_turns', 'avg_first_word_ms', 'max_first_word_ms',
+                     'ticket', 'ai_cost_usd', 'tokens_in', 'tokens_out', 'ended', 'reported', 'review_issues', 'version'])
+    for r in filter_calls(calls(), f):
+        s, t = r['stats'], r['stats']['tokens'] or {}
+        writer.writerow([r['at'], r['reference'], r['caller'], s['duration_s'], r['turns'], s['first_word_avg_ms'], s['first_word_max_ms'],
+                         (s['ticket'] or {}).get('number', ''), '' if r['cost'] is None else f"{r['cost']:.4f}",
+                         t.get('input', 0) + t.get('cache_read', 0) + t.get('cache_write', 0) if t else '', t.get('output', '') if t else '',
+                         r['ended'] or 'hung up', 'yes' if r['flagged'] else '', len(r['review']['issues']) if r['review'] else '',
+                         (r['version'] or {}).get('code', '')])
+    return PlainTextResponse(out.getvalue(), media_type='text/csv; charset=utf-8',
+                             headers={'Content-Disposition': f'attachment; filename="calls-{datetime.now():%Y%m%d}.csv"'})
 
 
 @app.get('/calls/{name}/raw')

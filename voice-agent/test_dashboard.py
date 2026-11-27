@@ -2,6 +2,7 @@
 import io
 import json
 from pathlib import Path
+import re
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -285,6 +286,58 @@ class DashboardTests(unittest.TestCase):
         self.assertIn('name="a"', self.client.get('/tests').text)
         self.assertEqual(self.client.get('/tests/compare?a=20261127-090000&b=20261127-090000').status_code, 400)
         self.assertEqual(self.client.get('/tests/compare?a=..%2F..&b=20261127-090000').status_code, 404)
+
+    def test_trends(self):
+        from datetime import date
+        self.call_with_usage()  # today: 1 call, first word 3.1 s, costed
+        self.make_call()        # today: 1 call, no timing or tokens
+        self.write_run(datetime_name := date.today().strftime('%Y%m%d') + '-090000', {'A-1': [True], 'B-1': [False]})
+        rows, runs = dashboard.calls(), dashboard.harness_runs()
+        data, tests = dashboard.trends(rows, runs, 14)
+        self.assertEqual(len(data), 14); self.assertEqual(data[-1]['day'], date.today())
+        self.assertEqual((data[-1]['calls'], data[-1]['first_ms'], data[-1]['costed']), (2, 3100, 1))
+        self.assertAlmostEqual(data[-1]['cost'], (4000 + 2000 + 1800) / 1e6)
+        self.assertEqual(data[0]['calls'], 0); self.assertIsNone(data[0]['first_ms'])
+        self.assertEqual([(t['name'], t['rate']) for t in tests], [(datetime_name, 0.5)])
+        page_text = self.client.get('/?days=30').text
+        for text in ['Calls per day', 'Average time to first word', 'AI cost per call', 'Test pass rate', '50%',
+                     'class="spark"', 'Daily figures as a table', 'href="/?days=90"']:
+            self.assertIn(text, page_text)
+        self.assertEqual(self.client.get('/?days=7').status_code, 200)  # unknown ranges fall back to 14 days
+        self.assertIn('No data in this period yet.', dashboard.spark([('a', None, '')], 'line', str))
+
+    def test_calls_filters_sorting_and_pages(self):
+        slow = self.call_with_usage()   # ref 5150: ticket #881, first word 3.1 s, costed, ended goodbye
+        plain = self.make_call()         # ref 4721: "black" screen, reported, ended goodbye
+        with patch('sys.stderr', io.StringIO()):
+            t = transcripts.CallTranscript('CA' + '5' * 32, True, details={'reference': '6006', 'version': {'code': 'new1234'}})
+            t.event('caller', {'text': 'What channels are there?'})
+            t.event('closed', {'reason': 'clinical'})
+        refs = lambda url: re.findall(r'<b>(\d{4})</b>', self.client.get(url).text)
+        self.assertEqual(sorted(refs('/calls')), ['4721', '5150', '6006'])
+        self.assertEqual(refs('/calls?q=channels'), ['6006'])         # words said in the call
+        self.assertEqual(refs('/calls?q=5150'), ['5150'])
+        self.assertEqual(refs('/calls?ticket=yes'), ['5150'])
+        self.assertEqual(sorted(refs('/calls?ticket=no')), ['4721', '6006'])
+        self.assertEqual(refs('/calls?speed=slow'), ['5150'])
+        self.assertEqual(refs('/calls?ended=clinical'), ['6006'])
+        self.assertEqual(refs('/calls?version=new1234'), ['6006'])
+        self.assertEqual(refs('/calls?show=reported'), ['4721'])
+        self.assertEqual(refs('/calls?range=today&start=2000-01-01'), refs('/calls?range=today'))
+        self.assertEqual(refs('/calls?end=2000-01-01'), [])
+        self.assertEqual(refs('/calls?sort=first&dir=desc')[0], '5150')
+        self.assertEqual(refs('/calls?sort=cost&dir=asc')[-1], '5150')  # the only costed call sorts last when ascending
+        page_text = self.client.get('/calls?ticket=no').text
+        self.assertIn('<b>2</b> of 3 calls', page_text); self.assertIn('href="/calls.csv?ticket=no"', page_text)
+        with patch.object(dashboard, 'PAGE_SIZE', 1):
+            first, second = self.client.get('/calls').text, self.client.get('/calls?page=2').text
+            self.assertIn('page 1 of 3', first); self.assertIn('page 2 of 3', second)
+            self.assertIn('href="/calls?page=2"', first)
+            self.assertIn('page 3 of 3', self.client.get('/calls?page=99').text)
+        csv_text = self.client.get('/calls.csv?ticket=yes').text.splitlines()
+        self.assertEqual(len(csv_text), 2); self.assertIn('5150', csv_text[1]); self.assertIn('881', csv_text[1])
+        self.assertEqual(self.client.get('/calls?q=<script>').status_code, 200)
+        self.assertNotIn('<script>"', self.client.get('/calls?q=<script>').text)
 
     def test_markdown_renderer_escapes(self):
         html = dashboard.markdown('# Title\n- item <script>\n```\ncode <x>\n```\n**bold**')
