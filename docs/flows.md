@@ -101,6 +101,26 @@ and `tickets` scenarios, and commit `voice-agent/flows/`.
   scenarios 12/12.
 - Open polish item: occasional narration such as "I'll look up your bed first".
 
+### Lost answers (server test call, 28 Nov) and fixes
+
+The agent asked "Which hospital are you at, Royal Adelaide or Royal North Shore?" and the caller's
+answer never arrived, twice. Twilio's `echoPromptFiltering` drops caller words that match what the
+agent just said, so an answer made only of the agent's words can vanish with no message. Changes:
+
+- **Echo filtering off.** Echo is handled by the non-interruptible greeting, medium interrupt
+  sensitivity, ignored backchannel, and an app-side check (`listening.py`): a prompt is ignored as
+  echo only if it arrives during or just after the agent's speech, has at least four words and
+  repeats the agent's words in order. Short answers (a hospital, a name, a bed number, "yes,
+  that's right") always get through. Ignored prompts are logged as "Ignored as echo".
+- **Silence fallback.** After a reply ending in a question, if nothing arrives 9 s after its
+  estimated playback end (Twilio sends no playback-finished message; the estimate is about 2.6
+  words a second), the agent asks once more: "Sorry, I didn't catch that." and the question (the
+  whole read-back if that was the question). The re-ask is in history and the transcript. The
+  greeting is covered too. After that it waits as before.
+- **Every relay message is logged** in the transcript file (`relay` events; phone numbers, account
+  and the call's nonce left out), and `speaker-events tokens-played` are switched on, so input
+  that never becomes a turn is visible. Only caller messages count towards the per-call limit.
+
 ### Server test call (28 Nov) and fixes
 
 A caller asked to resubmit a ticket. Mid-flow the agent said the flow note "sits in the user turn,

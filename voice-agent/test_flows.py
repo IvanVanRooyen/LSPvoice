@@ -213,7 +213,8 @@ class CallBehaviourTests(unittest.TestCase):
                                                cfg['public_base'] + '/voice', {'AccountSid': cfg['account_sid'], 'CallSid': sid})})
             relay = fromstring(post('CA' + '1' * 32).text).find('Connect/ConversationRelay')
             self.assertEqual((relay.get('echoPromptFiltering'), relay.get('welcomeGreetingInterruptible'),
-                              relay.get('interruptSensitivity'), relay.get('ignoreBackchannel')), ('true', 'none', 'medium', 'true'))
+                              relay.get('interruptSensitivity'), relay.get('ignoreBackchannel')), ('false', 'none', 'medium', 'true'))
+            self.assertEqual(relay.get('events'), 'speaker-events tokens-played')
             cfg['interruptSensitivity'] = 'low'
             relay = fromstring(post('CA' + '2' * 32).text).find('Connect/ConversationRelay')
             self.assertEqual(relay.get('interruptSensitivity'), 'low')

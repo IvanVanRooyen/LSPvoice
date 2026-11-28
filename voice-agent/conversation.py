@@ -301,6 +301,17 @@ class Conversation:
         self.partial = ''
         self._emit('interrupted', heard=heard)
 
+    def reprompt(self, text):
+        """The agent asks again after a silence (said by code): kept as its own assistant message, so the
+        model knows it was said and an interruption trims only this, not the reply before it."""
+        if self.history and self.history[-1]['role'] == 'user':
+            return False  # a caller turn is under way: nothing to re-ask
+        if self.history:  # after the greeting there is no history yet (the greeting isn't in it either)
+            self.history.append({'role': 'assistant', 'content': text})
+            self.last_assistant = len(self.history) - 1
+        self._emit('reprompt', text=text)
+        return True
+
     def discard_partial(self):
         self.partial = ''
 

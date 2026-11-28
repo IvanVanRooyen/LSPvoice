@@ -76,8 +76,14 @@ def usage_record(model, usage):
 def format_event(record):
     """One readable line for a transcript record, or None for records not shown in the terminal."""
     kind, at = record.get('kind'), record.get('at', '')[11:19]
-    if kind == 'usage':
+    if kind in ('usage', 'relay'):  # saved in the file; too frequent for the live view
         return None
+    if kind == 'echo_ignored':
+        return f'{at}  (echo)  │ ignored, repeats what the agent was saying: "{_short(record.get("text", ""), 120)}"'
+    if kind == 'silence':
+        return f'{at}  ·       │ no answer for {record.get("seconds")} s after the question'
+    if kind == 'reprompt':
+        return f'{at}  AGENT   │ {record.get("text")}  (asked again)'
     if kind == 'greeting':
         return f'{at}  AGENT   │ {record["text"]}  (greeting)'
     if kind == 'caller':

@@ -23,6 +23,7 @@ from twilio.request_validator import RequestValidator
 
 from configure import CONFIG, validate_url
 from conversation import Conversation
+import listening
 import pilot_log
 import flows
 from knowledge import Library
@@ -45,21 +46,27 @@ sessions = {}
 # Call limits: a support call with a ticket read-back can run well past 5 minutes.
 CALL_SECONDS = 15 * 60
 SESSION_SECONDS = CALL_SECONDS + 120  # must outlive the call, or /end and tickets lose their state
-MAX_EVENTS = 400                       # prompts + interruptions per call
+MAX_EVENTS = 400                       # caller prompts, interruptions and key presses per call
+MAX_MESSAGES = 20000                   # every relay message (speaker and played-token events included)
 WELCOME = "Hi, this is LSPcare's virtual support assistant, could I get your name or which hospital you were calling from?"
+GREETING_REPROMPT = "Sorry, I didn't catch that. Could I get your name, or which hospital you're calling from?"
 # Spoken by code (never generated) as soon as a ticket is being written: Zoho Desk takes several seconds.
 TICKET_HOLD_LINE = 'One moment while I log that for you.'
 # ConversationRelay speech settings; each can be overridden in the private config.
 SAY_VOICE = 'Polly.Olivia-Neural'  # Twilio <Say> voice for the fixed final words (Australian English)
 VOICE_DEFAULTS = {'language': 'en-AU', 'ttsProvider': 'ElevenLabs', 'voice': '56bWURjYFHyYyVf490Dp',
                   'hints': 'LSPcare,RAH,Royal Adelaide,RNS,RNSH,Royal North Shore,LSPC15mf,concession,Device ID',
-                  # Echo and false interruptions (Twilio ConversationRelay docs, best practices): the agent's
-                  # own voice picked up by the caller's microphone was cutting off the greeting and being
-                  # transcribed as the caller's words. Filtering uses ElevenLabs word timings.
-                  'echoPromptFiltering': 'true',
+                  # Echo filtering is off: Twilio drops caller words that match what the agent just said, so
+                  # an answer that repeats the agent ("Royal Adelaide" after "Royal Adelaide or Royal North
+                  # Shore?") could vanish with no message (server test call, 28 Nov). Echo is handled by
+                  # the non-interruptible greeting, medium sensitivity, ignored backchannel and an app-side
+                  # check that ignores only longer prompts repeating the agent's words (listening.py).
+                  'echoPromptFiltering': 'false',
                   'welcomeGreetingInterruptible': 'none',  # the short greeting always plays in full
                   'interruptSensitivity': 'medium',        # 'high' (default) is the easiest to trigger
-                  'ignoreBackchannel': 'true'}             # "yeah", "uh-huh" don't cut the agent off
+                  'ignoreBackchannel': 'true',             # "yeah", "uh-huh" don't cut the agent off
+                  # Who is speaking and what has been played, logged in the transcript (shapes undocumented).
+                  'events': 'speaker-events tokens-played'}
 SYSTEM = '''You are LSPcare's virtual support assistant, an AI, answering a staff-test line.
 If asked whether you are a person, say honestly that you are LSPcare's virtual (AI)
 assistant. Speak Australian English, calmly and briefly. Use fictional patient details only.
@@ -317,10 +324,38 @@ async def relay(ws:WebSocket):
     if not any(validator.validate(url,{},signature) for url in urls):
         await ws.close(code=1008);return
     await ws.accept()
-    sid=None;task=None;convo=None;state=None
+    sid=None;task=None;convo=None;state=None;silence=None
+    # What the agent is saying and when it should have finished playing (Twilio sends no such signal).
+    playing={'text':'','start':0.0,'until':0.0,'fresh':True}
+
+    def speaking(text):
+        if playing['fresh']:playing.update(text='',start=time.monotonic(),fresh=False)
+        playing['text']+=text
+        playing['until']=playing['start']+listening.playback_seconds(playing['text'])
 
     async def send_token(delta):
+        speaking(delta)
         await ws.send_json({'type':'text','token':delta,'last':False})
+
+    def cancel_silence():
+        nonlocal silence
+        if silence and not silence.done():silence.cancel()
+        silence=None
+
+    def watch_silence(reply,text=None):
+        """Re-ask once if the caller says nothing for SILENCE_SECONDS after a question finished playing."""
+        nonlocal silence
+        cancel_silence()
+        text=text or listening.reprompt_for(reply,((state or {}).get('flow') or {}).get('readback'))
+        if not text:return
+        async def wait():
+            await asyncio.sleep(max(0.0,playing['until']-time.monotonic())+listening.SILENCE_SECONDS)
+            if task and not task.done():return  # a reply is being prepared after all
+            if transcript:transcript.event('silence',{'seconds':listening.SILENCE_SECONDS})
+            if not convo.reprompt(text):return
+            playing['fresh']=True;speaking(text)
+            await ws.send_json({'type':'text','token':text,'last':True})
+        silence=asyncio.create_task(wait())
 
     async def stop_generation(heard=None):
         nonlocal task
@@ -333,11 +368,13 @@ async def relay(ws:WebSocket):
 
     async def turn(text):
         try:
+            playing['fresh']=True
             kind,value=await convo.respond(text)
             if kind=='finish':
                 state['reason']=value
                 await ws.send_json({'type':'end'});return
             await ws.send_json({'type':'text','token':'','last':True})
+            watch_silence(value)
         except asyncio.CancelledError:raise
         except Exception as error:
             # The caller only hears a generic goodbye; show the operator why. Never log key text.
@@ -371,16 +408,38 @@ async def relay(ws:WebSocket):
             transcript=CallTranscript(sid,cfg.get('transcripts')=='on',details={
                 'reference':state.get('reference'),'caller':state.get('caller'),
                 'version':pilot_log.version_stamp(cfg,system_prompt(cfg),knowledge())})
+            transcript.event('relay',listening.relay_record(setup))
             transcript.event('greeting',{'text':WELCOME})
             convo=build_conversation(cfg,sid,state,send_token,on_event,on_usage)
-            for _ in range(MAX_EVENTS):
+            speaking(WELCOME);watch_silence(WELCOME,GREETING_REPROMPT)  # the greeting asks a question too
+            caller_messages=0
+            for _ in range(MAX_MESSAGES):
                 event=await ws.receive_json()
-                if event.get('type')=='prompt' and event.get('last') is True:
+                kind=event.get('type') if isinstance(event,dict) else None
+                # Every message is recorded, so input that never becomes a turn is visible afterwards.
+                transcript.event('relay',listening.relay_record(event))
+                if kind in listening.CALLER_MESSAGES:
+                    caller_messages+=1
+                    if caller_messages>MAX_EVENTS:break
+                if kind=='prompt' and event.get('last') is True:
+                    text=str(event.get('voicePrompt',''))
+                    if (time.monotonic()<playing['until']+listening.ECHO_AFTER_PLAYBACK
+                            and listening.is_echo(text,playing['text'])):
+                        # The agent's own voice through the caller's microphone, not an answer.
+                        transcript.event('echo_ignored',{'text':text})
+                        watch_silence(playing['text'])
+                        continue
+                    cancel_silence()
                     await stop_generation()
-                    task=asyncio.create_task(turn(str(event.get('voicePrompt',''))))
-                elif event.get('type')=='interrupt':
+                    task=asyncio.create_task(turn(text))
+                elif kind=='interrupt':
+                    cancel_silence()
                     await stop_generation(str(event.get('utteranceUntilInterrupt','')))
-                elif event.get('type')=='error':
+                elif kind=='dtmf':
+                    cancel_silence()
+                elif kind=='info' and 'client' in str(event).lower():
+                    cancel_silence()  # the caller has started speaking (speaker events)
+                elif kind=='error':
                     print(f"[pilot] Twilio reported an error on {sid}: {str(event.get('description',''))[:300]}",
                           file=sys.stderr,flush=True)
                     state['reason']='error';await ws.send_json({'type':'end'});return
@@ -389,5 +448,6 @@ async def relay(ws:WebSocket):
         with suppress(Exception):await ws.send_json({'type':'end'})
     except WebSocketDisconnect:pass
     finally:
+        cancel_silence()
         await stop_generation()
         if transcript:transcript.event('closed',{'reason':(state or {}).get('reason'),'flagged':bool((state or {}).get('flagged'))})

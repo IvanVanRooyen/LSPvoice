@@ -157,7 +157,7 @@ class TranscriptTests(unittest.TestCase):
             files = list(Path(folder).glob('*.jsonl'))
             self.assertEqual(len(files), 1); self.assertTrue(is_private(files[0]))
             kinds = [json.loads(line)['kind'] for line in files[0].read_text(encoding='utf-8').splitlines()]
-        self.assertEqual(kinds[:2], ['started', 'greeting'])
+        self.assertEqual(kinds[:3], ['started', 'relay', 'greeting'])  # the setup message is logged too
         self.assertIn('caller', kinds); self.assertIn('tool', kinds); self.assertIn('agent', kinds); self.assertEqual(kinds[-1], 'closed')
         shown = console.getvalue()
         self.assertIn('CALLER  │ Royal Adelaide, bed 7G13101.', shown)

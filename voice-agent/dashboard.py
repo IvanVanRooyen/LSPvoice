@@ -409,6 +409,12 @@ def transcript_html(records):
                             f'({thousands(cached)} cached) · {thousands(out)} out · US${usd(by_model):.4f}')
                 pending = []
             parts.append(f'<div class="meta">⏱ {" · ".join(bits)}</div>')
+        elif kind == 'reprompt':
+            parts.append(f'<div class="b agent"><small>Agent · asked again · {when(r.get("at"))[11:]}</small>{e(r["text"])}</div>')
+        elif kind == 'silence':
+            parts.append(f'<div class="sys">No answer for {e(r.get("seconds"))} s after the question</div>')
+        elif kind == 'echo_ignored':
+            parts.append(f'<div class="sys">Ignored as echo of the agent\'s own voice: "{e(r.get("text"))}"</div>')
         elif kind == 'interrupted':
             parts.append(f'<div class="sys">↯ caller interrupted · they had heard: "{e(r.get("heard"))}"</div>')
         elif kind == 'finish':
@@ -1136,7 +1142,8 @@ SETTING_INFO = {
     'language': ('Voice and speech', 'Language', 'Speech recognition and voice language.', None),
     'hints': ('Voice and speech', 'Recognition hints', 'Comma-separated words the speech recogniser should expect (names, codes).', None),
     'say_voice': ('Voice and speech', 'Closing voice', 'Voice for the fixed final words (goodbye, call reference).', None),
-    'echoPromptFiltering': ('Voice and speech', 'Echo filtering', "Ignore the agent's own voice picked up by the caller's microphone.", None),
+    'echoPromptFiltering': ('Voice and speech', 'Echo filtering', "Twilio drops caller words that match what the agent just said. Off by default: "
+                            'an answer repeating the agent (a hospital, a name) could vanish. Echo is checked in the app instead.', None),
     'welcomeGreetingInterruptible': ('Voice and speech', 'Greeting can be interrupted by', 'none = the greeting always plays in full.', None),
     'interruptSensitivity': ('Voice and speech', 'Interrupt sensitivity', 'How easily caller speech cuts the agent off; high is the easiest.', None),
     'ignoreBackchannel': ('Voice and speech', 'Ignore "yeah", "uh-huh"', 'Short acknowledgements do not cut the agent off.', None),
