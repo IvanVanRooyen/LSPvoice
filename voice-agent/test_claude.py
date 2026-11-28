@@ -207,5 +207,93 @@ class NumberRoutingTests(unittest.TestCase):
             configure.point_number({**CFG, 'public_base': 'https://voice.example.org'}, self.fake([old_quick])[0])
 
 
+def placement_problems(messages):
+    """The API's rule: a system message follows a user message and is followed by an assistant message or ends
+    the array; no empty turns."""
+    bad = []
+    for i, m in enumerate(messages):
+        if not m['content']:
+            bad.append(f'messages.{i}: empty {m["role"]}')
+        if m['role'] != 'system':
+            continue
+        if i == 0 or messages[i - 1]['role'] != 'user':
+            bad.append(f'messages.{i}: system not after a user message')
+        if i + 1 < len(messages) and messages[i + 1]['role'] != 'assistant':
+            bad.append(f'messages.{i}: system followed by {messages[i + 1]["role"]}')
+    return bad
+
+
+class InterruptionOrderTests(unittest.TestCase):
+    """A reply the caller talked over before hearing any of it must not break the rest of the call (fb1abfe)."""
+
+    def converse(self, streams, steps, session=None):
+        """Run a call with the real conversation engine; steps are caller lines or ('interrupted', heard)."""
+        import asyncio
+        fake = FakeClient(streams)
+        async def on_text(_): pass
+        with patch.object(claude_reply.anthropic, 'AsyncAnthropic', return_value=fake), patch('sys.stderr', io.StringIO()), \
+                patch.object(app, 'lookup', return_value={'device_found': True}):
+            convo = app.build_conversation({**CLAUDE_CFG, 'tickets': 'dry_run'}, 'CA-i', session if session is not None
+                                           else {'reference': '1234'}, on_text)
+            async def call():
+                for step in steps:
+                    if isinstance(step, tuple):
+                        convo.interrupted(step[1])
+                    else:
+                        try:
+                            await convo.respond(step)
+                        except asyncio.CancelledError:
+                            pass  # the caller spoke again before this turn finished
+            asyncio.run(call())
+        for n, request in enumerate(fake.requests, 1):
+            self.assertEqual(placement_problems(request['messages']), [], f'request {n}')
+        return fake.requests, convo
+
+    def test_unheard_reply_after_call_details(self):
+        requests, convo = self.converse([FakeStream('Thanks for calling. What can I help with?'), FakeStream('Sure.')],
+                                        ['Hi, Royal Adelaide.', ('interrupted', ''), 'Sorry, go on.'])
+        second = requests[1]['messages']
+        self.assertEqual([m['role'] for m in second], ['user', 'user', 'system'])
+        self.assertIn("this call's reference is 1 2 3 4", second[2]['content'])  # call details are never dropped
+        self.assertNotIn('What can I help with', json.dumps(second))  # nothing the caller didn't hear
+        self.assertIn("this call's reference is 1 2 3 4", [m['content'] for m in convo.history if m['role'] == 'system'][0])
+
+    def test_unheard_reply_after_a_turn_with_a_flow_note_and_tools(self):
+        session = {'reference': '1234', 'caller_turns': 1, 'flow': {'id': 'log_ticket', 'values': {}, 'confirmed': False,
+                                                                   'readback': None, 'readback_turn': None, 'result': None}}
+        record = tool_use('flow_record', {'values': [{'field': 'issue_summary', 'value': 'Black screen'}]})
+        requests, _ = self.converse(
+            [FakeStream(content=[record]), FakeStream('Which hospital are you at?'), FakeStream('Which hospital?'),
+             FakeStream('Thanks.')],
+            ['My screen is black, please log a ticket.', ('interrupted', ''), 'Sorry?', 'Royal Adelaide.'], session)
+        notes = [m['content'] for m in requests[-1]['messages'] if m['role'] == 'system']
+        self.assertTrue(any('Flow status' in n for n in notes))  # the note is still there, not removed
+
+    def test_partly_heard_reply_is_kept(self):
+        requests, _ = self.converse([FakeStream('Thanks for calling. What can I help with?'), FakeStream('Sure.')],
+                                    ['Hi, Royal Adelaide.', ('interrupted', 'Thanks for'), 'Sorry, go on.'])
+        self.assertEqual([m['role'] for m in requests[1]['messages']], ['user', 'system', 'assistant', 'user'])
+        self.assertEqual(requests[1]['messages'][2]['content'], 'Thanks for')
+
+    def test_turn_cancelled_by_the_caller_speaking_again(self):
+        import asyncio
+        class Cancelled(FakeStream):
+            async def __aenter__(self): raise asyncio.CancelledError
+        requests, _ = self.converse([FakeStream('Hi Sam. What can I help with?'), Cancelled(), FakeStream('Sure.')],
+                                    ['Hi, it is Sam.', 'My screen', ('interrupted', ''), 'My screen is black.'])
+        self.assertEqual([m['role'] for m in requests[-1]['messages']], ['user', 'system', 'assistant', 'user', 'user'])
+
+    def test_request_order_rules(self):
+        build = claude_reply.request_messages
+        history = [{'role': 'user', 'content': 'a'}, {'role': 'system', 'content': 'details'}, {'role': 'assistant', 'content': ''},
+                   {'role': 'user', 'content': 'b'}, {'role': 'system', 'content': 'note 1'}, {'role': 'assistant', 'content': ''}]
+        self.assertEqual(build(history, 'note 2'),
+                         [{'role': 'user', 'content': 'a'}, {'role': 'user', 'content': 'b'},
+                          {'role': 'system', 'content': 'details\n\nnote 1\n\nnote 2'}])
+        normal = [{'role': 'user', 'content': 'a'}, {'role': 'system', 'content': 'details'}, {'role': 'assistant', 'content': 'x'}]
+        self.assertEqual(build(normal), normal)  # the usual order is left exactly as it is
+        self.assertEqual(build(normal + [{'role': 'user', 'content': 'b'}], 'n')[-1], {'role': 'system', 'content': 'n'})
+
+
 if __name__ == '__main__':
     unittest.main()

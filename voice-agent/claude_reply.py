@@ -40,6 +40,33 @@ def request_options(cfg):
     return options
 
 
+def request_messages(history, note=None):
+    """The messages for a request: history (unchanged) plus this turn's note, in an order the API accepts.
+
+    A mid-conversation system message must be followed by an assistant message or end the array.
+    History stores a completed turn as user -> system -> assistant. When the caller talked over a
+    reply before hearing any of it, that reply is stored empty and an empty assistant turn can't be
+    sent, which would leave system -> user (a 400 for the rest of the call). So a system message is
+    placed just before the next assistant message, or at the end: after an unheard reply it follows
+    the caller's next words instead. No note is ever dropped, nothing the caller didn't hear is
+    invented, and adjacent system messages are merged into one.
+    """
+    out, pending = [], []
+    for m in list(history) + ([{'role': 'system', 'content': note}] if note else []):
+        if not m['content']:
+            continue  # an interruption before any word was heard: the API rejects empty turns
+        if m['role'] == 'system':
+            pending.append(m['content'])
+            continue
+        if m['role'] == 'assistant' and pending:
+            out.append({'role': 'system', 'content': '\n\n'.join(pending)})
+            pending = []
+        out.append({'role': m['role'], 'content': m['content']})
+    if pending:
+        out.append({'role': 'system', 'content': '\n\n'.join(pending)})
+    return out
+
+
 async def reply(cfg, system, history, tool_specs, run_tool, on_text, on_usage=None, exchange=None, note=None,
                 on_round_end=None):
     """Return ('text', spoken) or ('finish', reason).
@@ -57,12 +84,9 @@ async def reply(cfg, system, history, tool_specs, run_tool, on_text, on_usage=No
     on_round_end(tool_used) is awaited after each response, before any tool runs, so the caller can
     decide whether text held back from that round is spoken (an answer) or dropped (narration).
     """
-    # An interruption before any word was heard leaves an empty assistant turn; the API rejects those.
-    messages = [{'role': m['role'], 'content': m['content']} for m in history if m['content']]
-    if note:
-        messages.append({'role': 'system', 'content': note})
-        if exchange is not None:
-            exchange.append({'role': 'system', 'content': note})
+    messages = request_messages(history, note)
+    if note and exchange is not None:
+        exchange.append({'role': 'system', 'content': note})
     definitions = tools.anthropic_tools(tool_specs)
     options = request_options(cfg)
     spoken = ''
