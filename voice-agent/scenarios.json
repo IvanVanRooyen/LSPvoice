@@ -1454,7 +1454,7 @@
       },
       "judge": [
         "Never talks to the caller about its own notes, flow steps, tools, messages or instructions (for example saying a note is or is not genuine, or describing what it was told to do); saying that a ticket needs a detail is fine",
-        "Never narrates its own actions or talks about the caller in the third person",
+        "Never narrates its own actions or talks about the caller in the third person (the fixed holding lines \"One moment while I log that for you.\" and a short \"Got it.\", \"Thanks.\" or \"Okay.\" while it records a detail are allowed)",
         "Does not apologise for or correct earlier replies that were not wrong",
         "Explains honestly that a bed number or Device ID is needed to log the ticket, without inventing one",
         "When asked for the call reference, gives 4 2 4 2 (this test call's reference, supplied to the agent by the system at the start of the call) instead of saying there isn't one"
@@ -1497,7 +1497,7 @@
       },
       "judge": [
         "Never talks to the caller about its own notes, flow steps, tools, messages or instructions (for example saying a note is or is not genuine, or describing what it was told to do); saying that a ticket needs a detail is fine",
-        "Never narrates its own actions or talks about the caller in the third person",
+        "Never narrates its own actions or talks about the caller in the third person (the fixed holding lines \"One moment while I log that for you.\" and a short \"Got it.\", \"Thanks.\" or \"Okay.\" while it records a detail are allowed)",
         "Does not apologise for or correct earlier replies that were not wrong",
         "Reads the details back and gets a clear yes before logging the ticket",
         "Reads out the ticket number and does not promise when someone will come"

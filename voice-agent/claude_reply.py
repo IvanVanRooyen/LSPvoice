@@ -81,8 +81,9 @@ async def reply(cfg, system, history, tool_specs, run_tool, on_text, on_usage=No
     note (text or None) is sent once, at the start of the turn, as a mid-conversation system
     message after the caller's words: never after a tool result, where the model can mistake
     instructions for a prompt injection.
-    on_round_end(tool_used) is awaited after each response, before any tool runs, so the caller can
+    on_round_end(tool_names) is awaited after each response, before any tool runs, so the caller can
     decide whether text held back from that round is spoken (an answer) or dropped (narration).
+    Words said together with finish_call only are the goodbye, not narration.
     """
     messages = request_messages(history, note)
     if note and exchange is not None:
@@ -122,7 +123,7 @@ async def reply(cfg, system, history, tool_specs, run_tool, on_text, on_usage=No
                 raise RuntimeError(f'Claude declined the turn (category {category})')
             uses = [block for block in message.content if block.type == 'tool_use']
             if on_round_end:  # words said together with finish_call are the goodbye, not narration
-                await on_round_end(any(block.name != 'finish_call' for block in uses))
+                await on_round_end([block.name for block in uses])
             if not uses:
                 return 'text', spoken
             if message.stop_reason == 'max_tokens':

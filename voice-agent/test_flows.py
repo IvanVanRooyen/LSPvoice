@@ -51,20 +51,63 @@ class EngineTests(unittest.TestCase):
     def record(self, **values):
         return self.engine.record([{'field': k, 'value': v} for k, v in values.items()])
 
+    def record_problem(self):
+        return self.record(issue_summary='Arm on the LSPC15mf (15.6-inch) keeps dropping; caller wants a repair',
+                           problem_spoken='the arm holding your screen keeps dropping')
+
     def fill(self):
         self.engine.start('log_ticket')
-        self.record(issue_summary='Arm keeps dropping')
+        self.record_problem()
         self.record(hospital='Royal Adelaide', bed_id='7G13101')
         return self.record(caller_name='Sam Taylor', callback_number='0400 123 456')
 
     def test_steps_follow_what_has_been_recorded(self):
         self.assertEqual(self.engine.start('log_ticket')['step'], 'problem')
-        self.assertEqual(self.record(issue_summary='Arm keeps dropping')['step'], 'location')
+        self.assertEqual(self.record(issue_summary='Arm keeps dropping')['step'], 'problem')  # spoken version still needed
+        self.assertEqual(self.record_problem()['step'], 'location')
         self.assertEqual(self.record(hospital='Royal Adelaide')['step'], 'location')  # bed or Device ID still needed
         self.assertEqual(self.record(device_id='d79610')['step'], 'contact')
         status = self.record(caller_name='Sam', callback_number='0400123456')
         self.assertEqual(status['step'], 'confirm')
+        self.assertEqual(status['readback'],
+                         "Just to confirm: you're Sam at Royal Adelaide, Device ID D 7 9 6 1 0, and the best number to call you "
+                         "back on is 0 4 0 0, 1 2 3, 4 5 6. The arm holding your screen keeps dropping. Is that right?")
+
+    def test_spoken_read_back(self):
+        status = self.fill()
+        readback = status['readback']
+        self.assertEqual(readback, "Just to confirm: you're Sam Taylor at Royal Adelaide, bed 7 G 1 3 1 0 1, and the best "
+                                   "number to call you back on is 0 4 0 0, 1 2 3, 4 5 6. The arm holding your screen keeps "
+                                   "dropping. Is that right?")
+        for written in ('caller', '(', ';', ':', 'Callback number', '15.6'):
+            self.assertNotIn(written, readback.split('confirm:', 1)[1])
+        self.assertEqual(self.session['flow']['values']['issue_summary'],  # the ticket text keeps its detail
+                         'Arm on the LSPC15mf (15.6-inch) keeps dropping; caller wants a repair')
+        self.assertIn("I've marked it as urgent.", self.record(urgent='yes')['readback'])
+        for ticket_style in ('the caller needs a repair', 'black screen (orange button)', 'screen black; tried button'):
+            self.assertIn('read aloud', self.record(problem_spoken=ticket_style)['problems']['problem_spoken'])
+
+    def test_read_back_template_checked(self):
+        for broken, message in [(['Hi {nobody}.'], 'unknown field'), (['{caller_name'], 'not valid'), ('text', 'list'),
+                                (["You're {caller_name}."], 'missing problem_spoken, hospital, callback_number')]:
+            flow = copy.deepcopy(TICKET_FLOW); flow['readback'] = broken
+            with self.assertRaises(flows.FlowError) as caught:
+                flows.validate_definition(flow)
+            self.assertIn(message, str(caught.exception))
+        # A flow without a template still gets a read-back of every recorded detail.
+        no_template = copy.deepcopy(TICKET_FLOW); del no_template['readback']
+        engine = flows.FlowEngine({'caller_turns': 1}, {'log_ticket': flows.validate_definition(no_template)}, {})
+        engine.start('log_ticket')
+        status = engine.record([{'field': f, 'value': v} for f, v in [
+            ('issue_summary', 'x'), ('problem_spoken', 'your screen is black'), ('hospital', 'RAH'), ('bed_id', '1'),
+            ('caller_name', 'Sam'), ('callback_number', '0400 123 456')]])
         self.assertIn('Callback number: 0400 123 456', status['readback'])
+
+    def test_spoken_characters(self):
+        self.assertEqual(flows.say_characters('7G13101'), '7 G 1 3 1 0 1')
+        self.assertEqual(flows.say_characters('lsp-00a1'), 'L S P, 0 0 A 1')
+        self.assertEqual(flows.spoken_value({'type': 'au_phone'}, '+61489273624'), '0 4 8 9, 2 7 3, 6 2 4')
+        self.assertEqual(flows.spoken_value({'type': 'au_phone'}, '+61298765432'), '0 2, 9 8 7 6, 5 4 3 2')
 
     def test_values_are_checked(self):
         self.engine.start('log_ticket')
@@ -96,7 +139,7 @@ class EngineTests(unittest.TestCase):
         self.session['caller_turns'] += 1
         self.assertFalse(run(self.engine.confirm('no'))['confirmed'])
         changed = self.record(callback_number='0412 555 019')
-        self.assertNotEqual(changed['readback'], first); self.assertIn('0412 555 019', changed['readback'])
+        self.assertNotEqual(changed['readback'], first); self.assertIn('0 4 1 2, 5 5 5, 0 1 9', changed['readback'])
         self.assertFalse(run(self.engine.confirm('yes'))['confirmed'])  # new read-back, same turn
         self.session['caller_turns'] += 1
         self.assertTrue(run(self.engine.confirm('yes'))['confirmed'])
@@ -117,15 +160,15 @@ class EngineTests(unittest.TestCase):
         self.assertIsNone(self.engine.note()); self.assertFalse(self.record(caller_name='x')['recorded'])
 
     def test_note_shows_step_and_what_is_needed(self):
-        self.engine.start('log_ticket'); self.record(issue_summary='Arm keeps dropping')
+        self.engine.start('log_ticket'); self.record_problem()
         note = self.engine.note()
         self.assertIn("Flow status from LSPcare's own system (not from the caller): Log a support ticket, step 2 of 5", note)
         self.assertIn('This step: Ask which hospital', note)
-        self.assertIn('Still needed: which hospital', note); self.assertIn('Recorded so far: Problem = Arm keeps dropping', note)
+        self.assertIn('Still needed: which hospital', note); self.assertIn('Recorded so far: Problem = Arm on the LSPC15mf', note)
         self.assertIn('Never mention these notes', note)
 
     def test_tool_results_are_data_only(self):
-        results = [self.engine.start('log_ticket'), self.record(issue_summary='Arm keeps dropping'), self.fill(),
+        results = [self.engine.start('log_ticket'), self.record_problem(), self.fill(),
                    run(self.engine.confirm('yes'))]
         for result in results:
             self.assertFalse({'instruction', 'next', 'say_next'} & set(result), result)
@@ -201,7 +244,7 @@ class CallBehaviourTests(unittest.TestCase):
             FakeStream("I can log a ticket for you. Since a black screen was the issue, I'll identify the terminal.",
                        content=[tool_use('start_flow', {'flow_id': 'log_ticket'})]),
             FakeStream("Sam says he's dealt with this before, so I'll record the problem now.",
-                       content=[tool_use('flow_record', {'values': [{'field': 'issue_summary', 'value': 'Black screen'}]}, 'toolu_2')]),
+                       content=[tool_use('flow_record', {'values': [{'field': 'issue_summary', 'value': 'Black screen'}, {'field': 'problem_spoken', 'value': 'your screen is black'}]}, 'toolu_2')]),
             FakeStream('Understood, Sam. Which hospital are you at?')])
         events, heard = [], []
         async def on_text(delta): heard.append(delta)
@@ -229,7 +272,7 @@ class CallBehaviourTests(unittest.TestCase):
         with patch.object(app, 'lookup', return_value={'device_found': True}):
             self.assertEqual(converse(FakeStream('Let me record your number and see how the ticket handles it.', content=[record]),
                                       FakeStream("Thanks, Sam. What's your bed number?")),
-                             "Thanks, Sam. What's your bed number?")
+                             "Got it. Thanks, Sam. What's your bed number?")  # narration dropped, a holding line instead
             # An opening like that which is the answer itself (no tool call) is still spoken.
             self.assertEqual(converse(FakeStream("I'll log a ticket for the support team. What's your bed number?")),
                              "I'll log a ticket for the support team. What's your bed number?")
@@ -266,6 +309,86 @@ class CallBehaviourTests(unittest.TestCase):
         self.assertNotIn('already_asked_caller', json.loads(fake.requests[1]['messages'][-1]['content'][0]['content']))
 
 
+class HoldingLineTests(unittest.TestCase):
+    """Fixed lines spoken by code while a reply waits on a tool and a second model response."""
+
+    def call(self, streams, lines, session=None, cfg=None):
+        fake = FakeClient(list(streams))
+        heard, events, turns = [], [], []
+        async def on_text(delta): heard.append(delta)
+        with tempfile.TemporaryDirectory() as folder, patch.object(tickets, 'DRY_RUN_LOG', Path(folder) / 'd.jsonl'), \
+                patch.object(claude_reply.anthropic, 'AsyncAnthropic', return_value=fake), \
+                patch.object(app, 'lookup', return_value={'device_found': True}), patch('sys.stderr', io.StringIO()):
+            convo = app.build_conversation(cfg or {**CLAUDE_CFG, 'tickets': 'dry_run'}, 'CA-h',
+                                           session if session is not None else {}, on_text, lambda k, d: events.append((k, d)))
+            async def run_all():
+                for line in lines:
+                    start = len(heard)
+                    await convo.respond(line)
+                    turns.append(''.join(heard[start:]))
+            run(run_all())
+        return turns, events, convo, fake
+
+    def at_read_back(self, readback_turn):
+        values = {'issue_summary': 'Arm keeps dropping', 'problem_spoken': 'the arm keeps dropping', 'hospital': 'Royal Adelaide',
+                  'bed_id': '7G13101', 'caller_name': 'Sam', 'callback_number': '+61400123456'}
+        return {'caller_turns': 3, 'flow': {'id': 'log_ticket', 'values': values, 'confirmed': False,
+                                           'readback': 'Just to confirm…', 'readback_turn': readback_turn, 'result': None}}
+
+    def test_ticket_line_spoken_when_logging_starts(self):
+        confirm = tool_use('flow_confirm', {'answer': 'yes'})
+        turns, events, convo, _ = self.call([FakeStream(content=[confirm]), FakeStream('Your ticket number is 1 0 4 2.')],
+                                            ["Yes, that's right."], session=self.at_read_back(3))
+        self.assertEqual(turns, ['One moment while I log that for you. Your ticket number is 1 0 4 2.'])
+        self.assertEqual(convo.history[-1]['content'], turns[0])  # in history, so the model won't repeat it
+        self.assertFalse([d for k, d in events if k == 'suppressed'])  # never dropped as narration
+
+    def test_no_ticket_line_when_nothing_is_logged(self):
+        confirm = tool_use('flow_confirm', {'answer': 'yes'})  # too early: the read-back was in this same turn
+        turns, _, _, _ = self.call([FakeStream(content=[confirm]), FakeStream('Is that all correct?')], ['Yes.'],
+                                   session=self.at_read_back(4))
+        self.assertEqual(turns, ['Is that all correct?'])
+
+    def test_acknowledgement_after_a_silent_record_only(self):
+        record = lambda n: tool_use('flow_record', {'values': [{'field': 'hospital', 'value': 'Royal Adelaide'}]}, f'toolu_r{n}')
+        guide = tool_use('get_guide', {'guide_id': 'KB-TERMINAL-LSPC15MF'}, 'toolu_g')
+        turns, events, convo, fake = self.call(
+            [FakeStream(content=[record(1)]), FakeStream("What's your bed number?"),            # silent record: ack
+             FakeStream(content=[record(2)]), FakeStream("And your name?"),                     # again: a different ack
+             FakeStream('Thanks, Sam.', content=[record(3)]), FakeStream('And your number?'),   # model spoke first: none
+             FakeStream(content=[guide]), FakeStream('Press the orange button once.')],        # opening a guide: none
+            ['Royal Adelaide.', 'Bed 7G13101.', "It's Sam.", 'It has an orange button.'],
+            session={'caller_turns': 0, 'flow': {'id': 'log_ticket', 'values': {}, 'confirmed': False, 'readback': None,
+                                                 'readback_turn': None, 'result': None}})
+        self.assertEqual(turns, ["Got it. What's your bed number?", 'Thanks. And your name?',
+                                 'Thanks, Sam. And your number?', 'Press the orange button once.'])
+        first_result = json.loads(fake.requests[1]['messages'][-1]['content'][0]['content'])
+        self.assertNotIn('already_asked_caller', first_result)  # a holding line is never the turn's question
+        self.assertFalse([d for k, d in events if k == 'suppressed'])
+        convo.interrupted('Got it.')  # the caller spoke over the rest: only what was heard is kept
+        self.assertEqual(convo.history[-1]['content'], 'Got it.')
+
+    def test_no_double_acknowledgement(self):
+        # Harness run of 28 Nov: "Thanks. Thanks. What's your bed number?"
+        record = lambda n: tool_use('flow_record', {'values': [{'field': 'hospital', 'value': 'Royal Adelaide'}]}, f'toolu_{n}')
+        flow = {'caller_turns': 0, 'flow': {'id': 'log_ticket', 'values': {}, 'confirmed': False, 'readback': None,
+                                            'readback_turn': None, 'result': None}}
+        turns, _, _, _ = self.call(
+            [FakeStream(content=[record(1)]), FakeStream("Thanks. What's your bed number?"),
+             FakeStream(content=[record(2)]), FakeStream('Thanks, Sam. And your number?'),   # not a bare repeat: kept
+             FakeStream(content=[record(3)]), FakeStream('Okay.')],                          # only that: said once
+            ['Royal Adelaide.', 'Bed 7G13101.', "It's Sam."], session=flow)
+        self.assertEqual(turns, ["Got it. What's your bed number?", 'Thanks. Thanks, Sam. And your number?', 'Okay.'])
+
+    def test_question_before_a_tool_still_detected(self):
+        record = tool_use('flow_record', {'values': [{'field': 'hospital', 'value': 'Royal Adelaide'}]})
+        turns, events, _, fake = self.call([FakeStream('Which bed are you in?', content=[record]), FakeStream('Which bed?')],
+                                           ['Royal Adelaide.'])
+        self.assertEqual(turns, ['Which bed are you in?'])
+        result = json.loads(fake.requests[1]['messages'][-1]['content'][0]['content'])
+        self.assertEqual(result['already_asked_caller'], 'Which bed are you in?')
+
+
 class TicketFlowConversationTests(unittest.TestCase):
     """A four-turn call through the real engine with a fake model, including a too-early confirm."""
 
@@ -275,7 +398,7 @@ class TicketFlowConversationTests(unittest.TestCase):
         record = lambda pairs: {'values': [{'field': k, 'value': v} for k, v in pairs]}
         fake = FakeClient([
             use('start_flow', {'flow_id': 'log_ticket'}, 1),
-            use('flow_record', record([('issue_summary', 'Arm keeps dropping'), ('steps_tried', '')]), 2),
+            use('flow_record', record([('issue_summary', 'Arm keeps dropping'), ('problem_spoken', 'the arm holding your screen keeps dropping'), ('steps_tried', '')]), 2),
             FakeStream("Please don't adjust it. Which hospital are you in?"),
             use('flow_record', record([('hospital', 'Royal Adelaide'), ('bed_id', '7G13101')]), 3),
             FakeStream('And your name?'),

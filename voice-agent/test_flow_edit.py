@@ -44,18 +44,18 @@ class FlowEditTests(unittest.TestCase):
                 'field.bed_id.optional': '1', 'field.bed_id.max': '50'}
         new = flow_edit.from_form(self.flow, form)
         self.assertEqual(new['steps'][1]['instruction'], 'Ask for the bed number first, then the hospital.')
-        change = flow_edit.save('log_ticket', new, 'Product owner', 'Bed before hospital', self.dir, expected_version='1.0')
+        change = flow_edit.save('log_ticket', new, 'Product owner', 'Bed before hospital', self.dir, expected_version='1.1')
         raw = (self.dir / 'log_ticket.json').read_bytes()
         self.assertNotIn(b'\r', raw)
         saved = json.loads(raw)
-        self.assertEqual((saved['version'], saved['fields']['bed_id']['label']), ('1.1', 'Bed or room'))
-        self.assertEqual(saved['change_history'][-1]['from'], '1.0')
-        self.assertTrue((self.dir / 'archive' / 'log_ticket-v1.0.json').is_file())
+        self.assertEqual((saved['version'], saved['fields']['bed_id']['label']), ('1.2', 'Bed or room'))
+        self.assertEqual(saved['change_history'][-1]['from'], '1.1')
+        self.assertTrue((self.dir / 'archive' / 'log_ticket-v1.1.json').is_file())
         self.assertEqual(list(flows.load_flows(self.dir)), ['log_ticket'])  # the archive folder is not loaded
         labels = [what for what, _, _ in change['changes']]
         self.assertIn('Field Bed: label', labels); self.assertIn('Step "Where is the screen": instruction', labels)
         with self.assertRaises(flow_edit.EditError):  # opened before that save
-            flow_edit.save('log_ticket', new, 'Product owner', 'Again', self.dir, expected_version='1.0')
+            flow_edit.save('log_ticket', new, 'Product owner', 'Again', self.dir, expected_version='1.1')
 
     def test_refusals_write_nothing(self):
         before = (self.dir / 'log_ticket.json').read_bytes()

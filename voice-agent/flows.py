@@ -20,6 +20,8 @@ session and ends with the call.
 import argparse
 import json
 from pathlib import Path
+import re
+import string
 import sys
 
 import tickets
@@ -88,6 +90,25 @@ def validate_definition(flow, actions=ACTION_NAMES):
     for key in ('title', 'use_when', 'on_success', 'on_failure'):
         if not flow.get(key):
             raise FlowError(f'{fid}: missing {key}')
+    readback = flow.get('readback')
+    if readback is not None:
+        if not isinstance(readback, list) or not readback or not all(isinstance(p, str) and p for p in readback):
+            raise FlowError(f'{fid}: readback must be a list of text parts')
+        for part in readback:
+            try:
+                names = readback_fields(part)
+            except ValueError as error:
+                raise FlowError(f'{fid}: readback part {part!r} is not valid ({error})')
+            unknown = [n for n in names if n not in fields]
+            if unknown:
+                raise FlowError(f'{fid}: readback uses unknown field {unknown[0]}')
+        # The caller confirms what is read, so every required detail must be in it (a field marked
+        # "in_readback": false is ticket-only text that another field says aloud).
+        said = {n for part in readback for n in readback_fields(part)}
+        missing = [n for n, kind in collected.items() if kind == 'required' and n not in said
+                   and fields[n].get('in_readback', True)]
+        if missing:
+            raise FlowError(f'{fid}: the read-back must include every required detail; missing {", ".join(missing)}')
     return flow
 
 
@@ -131,6 +152,9 @@ def clean_value(spec, raw):
     if kind == 'au_phone':
         phone = tickets.au_phone(text)
         return (phone, None) if phone else (None, 'not an Australian mobile or landline number; ask again')
+    if spec.get('spoken') and SPOKEN_PROBLEMS.search(text):
+        return None, ("this is read aloud to the caller: one plain spoken sentence addressed to them, with no "
+                      "brackets, semicolons, colons or 'the caller'")
     return text[:spec.get('max', 600)], None
 
 
@@ -140,6 +164,35 @@ def display(spec, value):
     if spec['type'] == 'boolean':
         return 'yes' if value else 'no'
     return value
+
+
+def say_characters(text):
+    """'7G13101' -> '7 G 1 3 1 0 1': one character at a time, as the ticket number is read, so speech
+    doesn't turn it into "seven G thirteen thousand…"; separators become a short pause."""
+    groups = [' '.join(ch.upper() for ch in part) for part in re.split(r'[\s\-_/.]+', str(text)) if part]
+    return ', '.join(groups)
+
+
+def spoken_value(spec, value):
+    """A recorded value as it is read aloud in a read-back."""
+    if spec['type'] == 'au_phone':
+        return say_characters(spoken_phone(value))  # 0400 123 456 -> 0 4 0 0, 1 2 3, 4 5 6
+    if spec['type'] == 'boolean':
+        return ''  # a yes/no field only decides whether its sentence is said
+    if spec.get('say') == 'characters':
+        return say_characters(value)
+    if spec.get('spoken'):
+        sentence = str(value).strip().rstrip(',;:')
+        sentence = sentence[:1].upper() + sentence[1:]
+        return sentence if sentence[-1:] in '.!?' else sentence + '.'
+    return str(value)
+
+
+def readback_fields(part):
+    return [name for _, name, _, _ in string.Formatter().parse(part) if name]
+
+
+SPOKEN_PROBLEMS = re.compile(r'[()\[\];:]|\bthe (caller|patient)\b|\bcaller\b', re.IGNORECASE)
 
 
 # ------------------------------------------------------------------ engine
@@ -180,10 +233,23 @@ class FlowEngine:
         return len(flow['steps']), None, []
 
     def _readback(self):
+        """Built by code from the recorded values, so the caller confirms exactly what was read.
+
+        With a 'readback' template in the flow, each part is said only when every field it names has a
+        value (a yes/no field must be yes); otherwise every recorded field is read as 'Label: value'.
+        """
         flow, values = self._definition(), self.state['values']
-        parts = [f'{spec["label"]}: {display(spec, values[name])}' for name, spec in flow['fields'].items()
-                 if name in values and not (spec['type'] == 'boolean' and not values[name])]
-        return 'Just to confirm. ' + '. '.join(parts) + '. Is that all correct?'
+        fields = flow['fields']
+        if not flow.get('readback'):
+            parts = [f'{spec["label"]}: {display(spec, values[name])}' for name, spec in fields.items()
+                     if name in values and not (spec['type'] == 'boolean' and not values[name])]
+            return 'Just to confirm. ' + '. '.join(parts) + '. Is that all correct?'
+        said = []
+        for part in flow['readback']:
+            names = readback_fields(part)
+            if all(values.get(n) not in (None, '', False) for n in names):
+                said.append(part.format(**{n: spoken_value(fields[n], values[n]) for n in names}))
+        return ''.join(said).strip()
 
     def status(self, **extra):
         """The flow's state as data for a tool result: never instructions.

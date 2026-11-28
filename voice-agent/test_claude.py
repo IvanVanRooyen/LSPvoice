@@ -80,7 +80,8 @@ class ClaudeTests(unittest.TestCase):
             received = self.call(fake, 'Royal Adelaide, bed 7G13101.')
         lookup.assert_called_once_with('RAH', '7G13101', '')
         spoken = ''.join(r['token'] for r in received if r.get('type') == 'text')
-        self.assertEqual(spoken, 'Found it. Payment status is unknown.'); self.assertTrue(received[-1]['last'])
+        # The model's first response was a silent lookup, so a holding acknowledgement comes first.
+        self.assertEqual(spoken, 'Got it. Found it. Payment status is unknown.'); self.assertTrue(received[-1]['last'])
         first, second = fake.requests
         self.assertEqual(first['model'], 'claude-sonnet-5-5')
         self.assertEqual(first['output_config'], {'effort': 'low'})
@@ -261,7 +262,7 @@ class InterruptionOrderTests(unittest.TestCase):
     def test_unheard_reply_after_a_turn_with_a_flow_note_and_tools(self):
         session = {'reference': '1234', 'caller_turns': 1, 'flow': {'id': 'log_ticket', 'values': {}, 'confirmed': False,
                                                                    'readback': None, 'readback_turn': None, 'result': None}}
-        record = tool_use('flow_record', {'values': [{'field': 'issue_summary', 'value': 'Black screen'}]})
+        record = tool_use('flow_record', {'values': [{'field': 'issue_summary', 'value': 'Black screen'}, {'field': 'problem_spoken', 'value': 'your screen is black'}]})
         requests, _ = self.converse(
             [FakeStream(content=[record]), FakeStream('Which hospital are you at?'), FakeStream('Which hospital?'),
              FakeStream('Thanks.')],

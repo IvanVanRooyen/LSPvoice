@@ -229,7 +229,7 @@ class DashboardTests(unittest.TestCase):
             self.assertIn('/flows/log_ticket/edit', self.client.get('/flows').text)
             form = self.client.get('/flows/log_ticket/edit').text
             self.assertIn('name="step.location.instruction"', form); self.assertIn('Use the JSON below', form)
-            data = {'token': dashboard.TOKEN, 'version': '1.0', 'role': 'Product owner', 'note': 'Clearer wording',
+            data = {'token': dashboard.TOKEN, 'version': '1.1', 'role': 'Product owner', 'note': 'Clearer wording',
                     'step.contact.instruction': 'Ask for their name <b>, then a callback number.'}
             self.assertEqual(self.client.post('/flows/log_ticket/preview', data={**data, 'token': 'x'}).status_code, 403)
             preview = self.client.post('/flows/log_ticket/preview', data=data).text
@@ -243,12 +243,12 @@ class DashboardTests(unittest.TestCase):
             self.assertIn('callback_number', refused); self.assertIn('Preview and check', refused)
             broken = self.client.post('/flows/log_ticket/preview', data={**data, 'use_json': '1', 'json': '{not json'}).text
             self.assertIn('The JSON is not valid', broken); self.assertIn('{not json', broken)
-            saved = self.client.post('/flows/log_ticket/save', data={'token': dashboard.TOKEN, 'version': '1.0', 'role': 'Product owner',
+            saved = self.client.post('/flows/log_ticket/save', data={'token': dashboard.TOKEN, 'version': '1.1', 'role': 'Product owner',
                                                                     'note': 'Clearer wording', 'json': html.unescape(proposed)},
                                      follow_redirects=False)
             self.assertEqual(saved.status_code, 303)
             after = self.client.get(saved.headers['location']).text
-            self.assertIn('restart run.ps1', after); self.assertIn('v1.1', after)
+            self.assertIn('restart run.ps1', after); self.assertIn('v1.2', after)
             self.assertEqual(flows.load_flows(folder)['log_ticket']['steps'][2]['instruction'], 'Ask for their name <b>, then a callback number.')
             self.assertEqual(self.client.get('/flows/nope/edit').status_code, 404)
             self.assertEqual(self.client.get('/flows/..%2F..%2Fx/edit').status_code, 404)

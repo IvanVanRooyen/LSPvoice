@@ -20,6 +20,7 @@
       "type": "text",
       "max": 40,
       "optional": true,
+      "say": "characters",
       "ask": "the bed number"
     },
     "device_id": {
@@ -27,6 +28,7 @@
       "type": "text",
       "max": 60,
       "optional": true,
+      "say": "characters",
       "ask": "the Device ID, only if they don't know the bed"
     },
     "callback_number": {
@@ -38,7 +40,15 @@
       "label": "Problem",
       "type": "text",
       "max": 600,
-      "ask": "what the problem is, in the caller's words (include the identified terminal if known)"
+      "in_readback": false,
+      "ask": "what the problem is, for the support ticket (include the identified terminal if known)"
+    },
+    "problem_spoken": {
+      "label": "Problem (as read back)",
+      "type": "text",
+      "max": 300,
+      "spoken": true,
+      "ask": "the problem and anything already tried, as one short spoken sentence to the caller for the read-back, for example: the screen on your bedside terminal is completely black, and pressing the orange button didn't bring it back"
     },
     "steps_tried": {
       "label": "Already tried",
@@ -60,13 +70,14 @@
       "kind": "collect",
       "title": "Understand the problem",
       "fields": [
-        "issue_summary"
+        "issue_summary",
+        "problem_spoken"
       ],
       "also": [
         "steps_tried",
         "urgent"
       ],
-      "instruction": "Make sure you understand the problem and what has already been tried, then record it. Mark it urgent if the caller paid and it is not working, or was charged twice."
+      "instruction": "Make sure you understand the problem and what has already been tried, then record it twice in one flow_record: issue_summary for the support ticket, and problem_spoken as one short plain sentence to the caller for the read-back. Mark it urgent if the caller paid and it is not working, or was charged twice."
     },
     {
       "id": "location",
@@ -95,7 +106,7 @@
       "id": "confirm",
       "kind": "confirm",
       "title": "Read back and confirm",
-      "instruction": "Say the read-back exactly as written, word for word, saying numbers digit by digit, then stop and wait for the caller's answer. Then call flow_confirm with yes or no. If something is wrong, ask what to change and record the corrected value."
+      "instruction": "Say the read-back exactly as written, word for word, then stop and wait for the caller's answer. Then call flow_confirm with yes or no. If something is wrong, ask what to change and record the corrected value."
     },
     {
       "id": "log",
@@ -105,6 +116,16 @@
       "instruction": "The system logs the ticket after a yes."
     }
   ],
+  "readback": [
+    "Just to confirm: you're {caller_name} at {hospital}",
+    ", bed {bed_id}",
+    ", Device ID {device_id}",
+    ", and the best number to call you back on is {callback_number}.",
+    " {problem_spoken}",
+    " I've marked it as urgent.{urgent}",
+    " Is that right?"
+  ],
   "on_success": "Tell the caller their ticket is logged and read the ticket number out, digit by digit. Do not promise a callback time.",
-  "on_failure": "Say honestly that the ticket could not be logged, apologise, and do not try again on this call."
+  "on_failure": "Say honestly that the ticket could not be logged, apologise, and do not try again on this call.",
+  "version": "1.1"
 }

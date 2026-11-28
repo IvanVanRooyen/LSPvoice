@@ -113,7 +113,7 @@ class ScenarioRunTests(unittest.TestCase):
         self.assertEqual([m['role'] for m in sent], ['user', 'assistant', 'user', 'assistant', 'user'])
         self.assertEqual(sent[1]['content'][0], {'type': 'tool_use', 'id': 'toolu_1', 'name': 'lookup_device', 'input': lookup_args})
         self.assertEqual(sent[2]['content'][0]['type'], 'tool_result')
-        self.assertEqual(sent[3]['content'], 'Found bed 7G13101.')
+        self.assertEqual(sent[3]['content'], 'Got it. Found bed 7G13101.')  # the holding line is part of what was said
         convo.interrupted('Is the screen')  # repair still targets the spoken text turn
         self.assertEqual(convo.history[-1], {'role': 'assistant', 'content': 'Is the screen'})
 
@@ -162,7 +162,7 @@ class TranscriptTests(unittest.TestCase):
         shown = console.getvalue()
         self.assertIn('CALLER  │ Royal Adelaide, bed 7G13101.', shown)
         self.assertIn('lookup_device(RAH, bed=7G13101, id=-) → found: RAH ward 7G', shown)
-        self.assertIn('AGENT   │ Found it.', shown)
+        self.assertIn('AGENT   │ Got it. Found it.', shown)
 
     def test_follow_reads_new_lines_and_waits_for_partial_ones(self):
         with tempfile.TemporaryDirectory() as folder:

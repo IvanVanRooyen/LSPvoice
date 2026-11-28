@@ -116,8 +116,11 @@ def _write_dry_run(record):
         handle.write(json.dumps(record, ensure_ascii=False) + '\n')
 
 
-async def create(state, args, cfg, desk, lookup, call_sid):
-    """Run create_ticket for one call. state is the call's session dict."""
+async def create(state, args, cfg, desk, lookup, call_sid, on_sending=None):
+    """Run create_ticket for one call. state is the call's session dict.
+
+    on_sending() is awaited once every check has passed, just before the ticket is written (Zoho Desk
+    or the dry-run log): the moment the caller can be told "one moment while I log that"."""
     mode = cfg.get('tickets', 'dry_run')
     if mode not in MODES or mode == 'off':
         return {'ticket_logged': False, 'reason': 'tickets_unavailable: say a ticket cannot be logged on this line'}
@@ -136,6 +139,8 @@ async def create(state, args, cfg, desk, lookup, call_sid):
         phone = au_phone(args['callback_number'])
         location = lookup(args['hospital'], args['bed_id'], args['device_id'])
         body = build_body(args, phone, call_sid, location, cfg.get('ticket_subject_prefix', '[TEST] '))
+        if on_sending:
+            await on_sending()
         if mode == 'dry_run':
             number = 'DRY-' + secrets.token_hex(3).upper()
             await asyncio.to_thread(_write_dry_run, {'at': datetime.now(timezone.utc).isoformat(),

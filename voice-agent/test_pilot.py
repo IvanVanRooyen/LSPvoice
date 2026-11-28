@@ -98,8 +98,13 @@ class PilotTests(unittest.TestCase):
             with self.ws() as ws:
                 self.setup(ws,nonce)
                 ws.send_json({'type':'prompt','last':True,'voicePrompt':'Royal Adelaide, bed 7G13101.'})
-                self.assertEqual(ws.receive_json()['type'],'text')
-                self.assertTrue(ws.receive_json()['last'])
+                tokens=[]
+                while True:
+                    message=ws.receive_json();self.assertEqual(message['type'],'text')
+                    if message['last']:break
+                    tokens.append(message['token'])
+                # A silent lookup first gets a holding acknowledgement, then the answer.
+                self.assertEqual(''.join(tokens),'Got it. The device was found; payment status is unknown.')
         output=fake.requests[1]['input'][-1]
         result=json.loads(output['output'])
         self.assertTrue(result['device_found']);self.assertFalse(result['account_state_known'])

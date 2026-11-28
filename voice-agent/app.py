@@ -47,6 +47,8 @@ CALL_SECONDS = 15 * 60
 SESSION_SECONDS = CALL_SECONDS + 120  # must outlive the call, or /end and tickets lose their state
 MAX_EVENTS = 400                       # prompts + interruptions per call
 WELCOME = "Hi, this is LSPcare's virtual support assistant, could I get your name or which hospital you were calling from?"
+# Spoken by code (never generated) as soon as a ticket is being written: Zoho Desk takes several seconds.
+TICKET_HOLD_LINE = 'One moment while I log that for you.'
 # ConversationRelay speech settings; each can be overridden in the private config.
 SAY_VOICE = 'Polly.Olivia-Neural'  # Twilio <Say> voice for the fixed final words (Australian English)
 VOICE_DEFAULTS = {'language': 'en-AU', 'ttsProvider': 'ElevenLabs', 'voice': '56bWURjYFHyYyVf490Dp',
@@ -179,14 +181,20 @@ def make_runner(cfg, sid, session):
     """Async tool dispatcher for one call, shared by both AI providers (finish_call is handled by the loops).
 
     The flow engine is attached as run_tool.engine; its note() feeds the conversation.
+    run_tool.hold (set by build_conversation) speaks a fixed holding line while a slow action runs.
     """
+    async def logging_now():
+        hold = getattr(run_tool, 'hold', None)
+        if hold:
+            await hold(TICKET_HOLD_LINE)
+
     async def create_ticket_action(values):
         args = {'hospital': values.get('hospital', ''), 'bed_id': values.get('bed_id', ''),
                 'device_id': values.get('device_id', ''), 'caller_name': values.get('caller_name', ''),
                 'callback_number': values.get('callback_number', ''), 'issue_summary': values.get('issue_summary', ''),
                 'steps_tried': values.get('steps_tried', ''), 'urgent': bool(values.get('urgent')),
                 'caller_confirmed': True}  # the flow engine has enforced the read-back and the yes
-        result = await tickets.create(session, args, cfg, desk, lookup, sid)
+        result = await tickets.create(session, args, cfg, desk, lookup, sid, on_sending=logging_now)
         return {'ok': bool(result.get('ticket_logged')), **result, 'args': args}
 
     engine = flows.FlowEngine(session, FLOWS, {'create_ticket': create_ticket_action})
@@ -207,7 +215,7 @@ def make_runner(cfg, sid, session):
         if name == 'search_knowledge':
             return library.search(args['query'])
         if name == 'create_ticket':
-            return await tickets.create(session, args, cfg, desk, lookup, sid)
+            return await tickets.create(session, args, cfg, desk, lookup, sid, on_sending=logging_now)
         if name == 'report_problem':
             return pilot_log.record_report(session, args['description'], sid)
         raise ValueError('Unknown tool')
@@ -223,9 +231,11 @@ def build_conversation(cfg, sid, session, on_text, on_event=None, on_usage=None)
         # Per-call details go in a system message, not the system prompt, so the cached prompt stays the same.
         context = (f"Call details from LSPcare's own system: this call's reference is "
                    f"{pilot_log.spoken(session['reference'])}. Give it if the caller asks for it.")
-    return Conversation(cfg, lambda: system_prompt(cfg), lambda: tool_specs(cfg), runner, on_text, on_event,
-                        on_usage=on_usage, session=session, note=runner.engine.note if flows_on(cfg) else None,
-                        context=context)
+    convo = Conversation(cfg, lambda: system_prompt(cfg), lambda: tool_specs(cfg), runner, on_text, on_event,
+                         on_usage=on_usage, session=session, note=runner.engine.note if flows_on(cfg) else None,
+                         context=context)
+    runner.hold = convo.hold
+    return convo
 
 
 def lookup(hospital, bed_id, device_id):

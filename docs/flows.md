@@ -33,11 +33,34 @@ direct `create_ticket` tool, which is useful for comparisons in the test harness
 
 ## The ticket flow (`flows/log_ticket.json`)
 
-1. **Understand the problem** — problem (required), what was tried, urgent (optional)
+1. **Understand the problem** — the problem twice: for the ticket (`issue_summary`, detailed) and
+   as one short sentence to the caller for the read-back (`problem_spoken`, checked: no brackets,
+   semicolons, colons or "the caller"); what was tried and urgent are optional
 2. **Where is the screen** — hospital, plus bed number or Device ID
 3. **Who to call back** — name, Australian callback number
 4. **Read back and confirm** — system-written read-back; caller must say yes in a later turn
 5. **Log the ticket in Zoho Desk** — runs only after the yes; at most one ticket per call
+
+**The read-back** is built by code from the recorded values with the flow's `readback` template,
+so the caller confirms exactly what is read. Each part of the template is said only when every
+field it names has a value (a yes/no field only decides whether its part is said), for example:
+"Just to confirm: you're Sam at Royal Adelaide, bed 7 G 1 3 1 0 1, and the best number to call you
+back on is 0 4 0 0, 1 2 3, 4 5 6. The arm holding your screen keeps dropping. Is that right?"
+Phone numbers and fields marked `"say": "characters"` (bed, Device ID) are read one character at a
+time, grouped with short pauses, like the ticket number. The template must include every required
+detail (`"in_readback": false` marks ticket-only text such as `issue_summary`); a flow without a
+template is read as "Label: value". The ticket sent to Zoho Desk is unchanged.
+
+**Holding lines** (fixed wording, spoken by code, never generated) shorten the silences while a
+reply waits on a tool and a second model response:
+- "One moment while I log that for you." as soon as a ticket is being written (Zoho Desk takes
+  several seconds); not when nothing is logged, for example a confirmation that came too early.
+- A short acknowledgement ("Got it." / "Thanks." / "Okay.", in turn) when the model's first
+  response is a silent call to `flow_record` or `lookup_device`: the caller has just given a detail.
+  Other tool turns (opening a guide, starting a flow) and replies without tools get none.
+
+A holding line is part of the turn's spoken text (kept in history; an interruption keeps only what
+was heard), is never held back as narration and never counts as the turn's question.
 
 The dashboard's **Flows** page draws this from the file. `python flows.py --diagram log_ticket`
 prints a Mermaid diagram for documents.
