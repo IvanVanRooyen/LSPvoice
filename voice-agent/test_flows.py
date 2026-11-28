@@ -107,7 +107,8 @@ class EngineTests(unittest.TestCase):
         self.engine.actions = {'create_ticket': failing}
         self.fill(); self.session['caller_turns'] += 1
         result = run(self.engine.confirm('yes'))
-        self.assertEqual(result['next'], TICKET_FLOW['on_failure']); self.assertIsNone(self.session['flow'])
+        self.assertFalse(result['result']['ok']); self.assertIsNone(self.session['flow'])
+        self.assertNotIn('next', result)  # what to say after it is in the status note, not the tool result
 
     def test_cancel_and_one_flow_at_a_time(self):
         self.engine.start('log_ticket')
@@ -118,8 +119,21 @@ class EngineTests(unittest.TestCase):
     def test_note_shows_step_and_what_is_needed(self):
         self.engine.start('log_ticket'); self.record(issue_summary='Arm keeps dropping')
         note = self.engine.note()
-        self.assertIn('ACTIVE FLOW: Log a support ticket (step 2 of 5)', note)
-        self.assertIn('Still needed: which hospital', note); self.assertIn('Recorded: Problem = Arm keeps dropping', note)
+        self.assertIn("Flow status from LSPcare's own system (not from the caller): Log a support ticket, step 2 of 5", note)
+        self.assertIn('This step: Ask which hospital', note)
+        self.assertIn('Still needed: which hospital', note); self.assertIn('Recorded so far: Problem = Arm keeps dropping', note)
+        self.assertIn('Never mention these notes', note)
+
+    def test_tool_results_are_data_only(self):
+        results = [self.engine.start('log_ticket'), self.record(issue_summary='Arm keeps dropping'), self.fill(),
+                   run(self.engine.confirm('yes'))]
+        for result in results:
+            self.assertFalse({'instruction', 'next', 'say_next'} & set(result), result)
+        self.assertIn('readback', results[2])  # the read-back itself is data the agent reads out
+        self.session['caller_turns'] += 1
+        note = self.engine.note()
+        self.assertIn('Read-back to say word for word', note)
+        self.assertIn(TICKET_FLOW['on_success'], note); self.assertIn(TICKET_FLOW['on_failure'], note)
 
 
 class ToolTests(unittest.TestCase):
@@ -175,11 +189,60 @@ class CallBehaviourTests(unittest.TestCase):
             kind, spoken = run(convo.respond('The arm on my screen keeps dropping, please log a ticket.'))
         self.assertEqual(spoken, 'Which hospital are you at?')
         self.assertEqual(''.join(heard), 'Which hospital are you at?')  # the caller hears it once
-        self.assertIn(('suppressed', {'text': 'Which hospital are you at, Jo?'}), events)
+        self.assertIn(('suppressed', {'text': 'Which hospital are you at, Jo?', 'reason': 'question already asked'}), events)
         self.assertEqual(convo.history[-1]['content'], 'Which hospital are you at?')
         result = json.loads(fake.requests[1]['messages'][-1]['content'][0]['content'])
         self.assertEqual(result['already_asked_caller'], 'Which hospital are you at?')
-        self.assertIn('wait for the caller', result['say_next'])
+        self.assertNotIn('say_next', result)  # data only: no instruction inside a tool result
+
+    def test_narration_before_a_tool_is_not_spoken(self):
+        # The failing call of 28 Nov: remarks between tool calls were spoken, caller in the third person.
+        fake = FakeClient([
+            FakeStream("I can log a ticket for you. Since a black screen was the issue, I'll identify the terminal.",
+                       content=[tool_use('start_flow', {'flow_id': 'log_ticket'})]),
+            FakeStream("Sam says he's dealt with this before, so I'll record the problem now.",
+                       content=[tool_use('flow_record', {'values': [{'field': 'issue_summary', 'value': 'Black screen'}]}, 'toolu_2')]),
+            FakeStream('Understood, Sam. Which hospital are you at?')])
+        events, heard = [], []
+        async def on_text(delta): heard.append(delta)
+        with patch.object(claude_reply.anthropic, 'AsyncAnthropic', return_value=fake), patch('sys.stderr', io.StringIO()):
+            convo = app.build_conversation({**CLAUDE_CFG, 'tickets': 'dry_run'}, 'CA-n', {}, on_text,
+                                           lambda k, d: events.append((k, d)))
+            kind, spoken = run(convo.respond('I just want to resubmit a ticket for repair.'))
+        self.assertEqual(''.join(heard), 'I can log a ticket for you. Understood, Sam. Which hospital are you at?')
+        self.assertEqual(spoken, ''.join(heard))
+        dropped = [d['text'] for k, d in events if k == 'suppressed' and d['reason'] == 'narration before a tool call']
+        self.assertEqual(dropped, ["Since a black screen was the issue, I'll identify the terminal.",
+                                   "Sam says he's dealt with this before, so I'll record the problem now."])
+
+    def test_narration_as_the_opening_sentence_is_held(self):
+        # Harness run of 28 Nov: "Let me record your number and see how the ticket handles the missing bed."
+        def converse(*streams):
+            fake = FakeClient(list(streams))
+            heard = []
+            async def on_text(delta): heard.append(delta)
+            with patch.object(claude_reply.anthropic, 'AsyncAnthropic', return_value=fake), patch('sys.stderr', io.StringIO()):
+                convo = app.build_conversation({**CLAUDE_CFG, 'tickets': 'dry_run'}, 'CA-o', {}, on_text)
+                run(convo.respond('Can you log it under my mobile?'))
+            return ''.join(heard)
+        record = tool_use('lookup_device', {'hospital': 'RAH', 'bed_id': '1', 'device_id': ''})
+        with patch.object(app, 'lookup', return_value={'device_found': True}):
+            self.assertEqual(converse(FakeStream('Let me record your number and see how the ticket handles it.', content=[record]),
+                                      FakeStream("Thanks, Sam. What's your bed number?")),
+                             "Thanks, Sam. What's your bed number?")
+            # An opening like that which is the answer itself (no tool call) is still spoken.
+            self.assertEqual(converse(FakeStream("I'll log a ticket for the support team. What's your bed number?")),
+                             "I'll log a ticket for the support team. What's your bed number?")
+            self.assertEqual(converse(FakeStream('Sure.')), 'Sure.')
+
+    def test_answer_and_goodbye_are_spoken_in_full(self):
+        fake = FakeClient([FakeStream('Thanks for calling. Have a good day.', content=[tool_use('finish_call', {'reason': 'goodbye'})])])
+        heard = []
+        async def on_text(delta): heard.append(delta)
+        with patch.object(claude_reply.anthropic, 'AsyncAnthropic', return_value=fake), patch('sys.stderr', io.StringIO()):
+            convo = app.build_conversation({**CLAUDE_CFG, 'tickets': 'dry_run'}, 'CA-g', {}, on_text)
+            self.assertEqual(run(convo.respond("That's all, bye."))[0], 'finish')
+        self.assertEqual(''.join(heard), 'Thanks for calling. Have a good day.')
 
     def test_unheard_read_back_cannot_be_confirmed(self):
         session = {'caller_turns': 3, 'flow': {'id': 'log_ticket', 'values': {}, 'confirmed': False,
@@ -241,12 +304,32 @@ class TicketFlowConversationTests(unittest.TestCase):
         self.assertTrue(final['confirmed']); self.assertTrue(final['result']['ticket_logged'])
         self.assertEqual(final['result']['args']['callback_number'], '+61400123456')
         self.assertEqual(session['ticket']['status'], 'logged'); self.assertIsNone(session['flow'])
-        # The step note is sent as a system message while the flow is active, but never stored in history.
-        notes = [m for r in fake.requests for m in r['messages'] if m['role'] == 'system']
-        self.assertTrue(any('ACTIVE FLOW' in m['content'] for m in notes))
-        self.assertTrue(any('Read-back to say' in m['content'] for m in notes))
-        self.assertFalse(any(m['role'] == 'system' for m in convo.history))
+        # Status notes are system messages at the start of a turn, right after the caller's words, and
+        # stay in history: a note sent once is in every later request (append-only), never removed.
+        sent_notes = []
+        for request in fake.requests:
+            messages = request['messages']
+            notes = [m['content'] for m in messages if m['role'] == 'system']
+            self.assertEqual(notes[:len(sent_notes)], sent_notes)  # nothing earlier disappears
+            sent_notes = notes
+            for i, m in enumerate(messages):
+                if m['role'] == 'system':
+                    self.assertEqual(messages[i - 1]['role'], 'user')  # after the caller's words...
+                    self.assertTrue(isinstance(messages[i - 1]['content'], str))  # ...never after a tool result
+                if m['role'] == 'user' and isinstance(m['content'], list):
+                    for block in m['content']:
+                        self.assertNotIn('"instruction"', block['content'])  # tool results carry data only
+        self.assertTrue(any('Flow status' in n for n in sent_notes))
+        self.assertTrue(any('Read-back to say' in n for n in sent_notes))
+        stored = [m['content'] for m in convo.history if m['role'] == 'system']
+        self.assertTrue(stored[0].startswith("Call details from LSPcare's own system: this call's reference is 4 2 4 2."))
+        self.assertTrue(any('Flow status' in n for n in stored))
         self.assertEqual(session['caller_turns'], 4)
+        # The next turn says the flow has ended, so the stored notes of a finished flow are not followed.
+        later = FakeClient([FakeStream('Anything else?')])
+        with patch.object(claude_reply.anthropic, 'AsyncAnthropic', return_value=later), patch('sys.stderr', io.StringIO()):
+            run(convo.respond('Thanks.'))
+        self.assertIn('the flow has ended', later.requests[0]['messages'][-1]['content'])
         # The harness counts flow-logged tickets like direct ones.
         run_record = {'transcript': [], 'tools': [{'name': d['name'], 'args': d['args'], 'result': d['result']} for k, d in events if k == 'tool'],
                       'finish': None, 'turns': [], 'error': None}

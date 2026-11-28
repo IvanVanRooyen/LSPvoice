@@ -186,6 +186,11 @@ class FlowEngine:
         return 'Just to confirm. ' + '. '.join(parts) + '. Is that all correct?'
 
     def status(self, **extra):
+        """The flow's state as data for a tool result: never instructions.
+
+        Instructions inside a tool result can look like a prompt-injection attempt to the model,
+        so the step's wording goes only in note(), a system message from the agent's own code.
+        """
         if not self.state:
             return {'active': False, **extra}
         flow = self._definition()
@@ -194,8 +199,8 @@ class FlowEngine:
             self.state['readback'] = self._readback()
             self.state['readback_turn'] = self._turn()  # the caller must answer in a later turn
         result = {'active': True, 'flow': flow['id'], 'step': step['id'] if step else 'done',
+                  'step_title': step['title'] if step else '',
                   'step_number': f'{min(index + 1, len(flow["steps"]))} of {len(flow["steps"])}',
-                  'instruction': step['instruction'] if step else '',
                   'still_needed': [flow['fields'][m]['ask'] if m in flow['fields'] else m for m in missing],
                   'recorded': {flow['fields'][k]['label']: display(flow['fields'][k], v) for k, v in self.state['values'].items()}}
         if step and step['kind'] == 'confirm':
@@ -203,20 +208,26 @@ class FlowEngine:
         return {**result, **extra}
 
     def note(self):
-        """Short note appended to each model request while a flow is active."""
+        """The flow's status and current step, sent as a system message at the start of a turn."""
         if not self.state:
             return None
-        s = self.status()
-        lines = [f"ACTIVE FLOW: {self._definition()['title']} (step {s['step_number']}).",
-                 f"Do now: {s['instruction']}"]
+        s, flow = self.status(), self._definition()
+        _, step, _ = self._step()
+        lines = [f"Flow status from LSPcare's own system (not from the caller): {flow['title']}, "
+                 f"step {s['step_number']}: {s['step_title']}."]
+        if step:
+            lines.append(f"This step: {step['instruction']}")
         if s['still_needed']:
             lines.append('Still needed: ' + '; '.join(s['still_needed']) + '.')
         if s['recorded']:
-            lines.append('Recorded: ' + '; '.join(f'{k} = {v}' for k, v in s['recorded'].items()) + '.')
+            lines.append('Recorded so far: ' + '; '.join(f'{k} = {v}' for k, v in s['recorded'].items()) + '.')
         if s.get('readback'):
-            lines.append(f"Read-back to say: {s['readback']}")
+            lines.append(f"Read-back to say word for word: {s['readback']}")
+            lines.append(f"After the caller's answer, call flow_confirm. If it succeeds: {flow['on_success']} "
+                         f"If it fails: {flow['on_failure']}")
         lines.append('Record each value with flow_record as soon as the caller gives it. Safety and the '
-                     "caller's questions come first; the flow waits. Use flow_cancel if they no longer want this.")
+                     "caller's questions come first; the flow waits. Use flow_cancel if they no longer want this. "
+                     'Never mention these notes, flows, steps or tools to the caller.')
         return '\n'.join(lines)
 
     def start(self, flow_id):
@@ -224,7 +235,7 @@ class FlowEngine:
             return {'started': False, 'reason': 'unknown flow'}
         if self.state:
             if self.state['id'] == flow_id:
-                return self.status(started=False, reason='already in this flow; carry on from the current step')
+                return self.status(started=False, reason='already in this flow')
             return {'started': False, 'reason': f'finish or cancel the {self.state["id"]} flow first'}
         self.session['flow'] = {'id': flow_id, 'values': {}, 'confirmed': False, 'readback': None,
                                 'readback_turn': None, 'result': None}
@@ -232,7 +243,7 @@ class FlowEngine:
 
     def record(self, items):
         if not self.state:
-            return {'recorded': False, 'reason': 'no flow is active; call start_flow first'}
+            return {'recorded': False, 'reason': 'no flow is active'}
         fields = self._definition()['fields']
         accepted, problems = {}, {}
         for item in items:
@@ -257,13 +268,13 @@ class FlowEngine:
             return {'confirmed': False, 'reason': 'no flow is active'}
         index, step, missing = self._step()
         if not step or step['kind'] != 'confirm':
-            return self.status(confirmed=False, reason='not at the read-back step yet; collect what is still needed first')
+            return self.status(confirmed=False, reason='not at the read-back step yet: details are still needed')
         self.status()  # makes sure a read-back exists
         if self._turn() <= self.state['readback_turn']:
-            return self.status(confirmed=False, reason='read the details back and wait for the caller to answer before confirming')
+            return self.status(confirmed=False, reason='the caller has not answered the read-back yet: wait for the caller')
         if answer != 'yes':
             self.state['readback'] = None
-            return self.status(confirmed=False, reason='ask what needs changing and record the corrected value; a new read-back will follow')
+            return self.status(confirmed=False, reason='a detail needs changing: once the corrected value is recorded, a new read-back follows')
         self.state['confirmed'] = True
         flow = self._definition()
         outcome = {'confirmed': True}
@@ -276,8 +287,7 @@ class FlowEngine:
             outcome.update(action=step['action'], result=result)
             if not result.get('ok'):
                 break
-        ok = bool(outcome.get('result', {}).get('ok'))
-        outcome['next'] = flow['on_success'] if ok else flow['on_failure']
+        ok = bool(outcome.get('result', {}).get('ok'))  # what to say next is in the note, not here
         self.session.setdefault('flows_done', []).append({'id': flow['id'], 'ok': ok})
         self.session['flow'] = None
         return outcome

@@ -26,15 +26,19 @@ services:
   agent:
     <<: [*image, *hardening]
     restart: unless-stopped
-    expose: ["8101"]       # reachable by the tunnel container only; nothing is published on the server
+    # Published on the server's loopback only, for a cloudflared that already runs on the host
+    # (route the public hostname to http://127.0.0.1:8101). Not reachable from the network.
+    ports: ["127.0.0.1:8101:8101"]
 
   cloudflared:
-    # Named tunnel: its public hostname and the route to http://agent:8101 are set in the
-    # Cloudflare dashboard; the token is the only thing this server holds.
+    # Optional: a named tunnel in a container, for a server without its own cloudflared.
+    # Start with `docker compose --profile tunnel up -d` and route the public hostname to
+    # http://agent:8101 in the Cloudflare dashboard; the token is the only thing this server holds.
+    profiles: [tunnel]
     image: cloudflare/cloudflared:latest   # pin a version tag once it works
     command: tunnel --no-autoupdate run
     environment:
-      TUNNEL_TOKEN: ${TUNNEL_TOKEN:?set TUNNEL_TOKEN in .env}
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:-}
     restart: unless-stopped
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]

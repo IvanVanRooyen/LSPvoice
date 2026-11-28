@@ -47,7 +47,8 @@ class SpokenTextTests(unittest.TestCase):
             self.assertEqual(spoken(*list(text)), text, 'char by char: ' + text)
 
     def test_space_added_between_text_around_a_tool_call(self):
-        fake = FakeClient([FakeStream('Let me check.', content=[tool_use('get_guide', {'guide_id': 'KB-TERMINAL-LSPC15MF'})]),
+        # (An opening like "Let me check." is narration and is no longer spoken before a tool call.)
+        fake = FakeClient([FakeStream("That's the LSPC15mf.", content=[tool_use('get_guide', {'guide_id': 'KB-TERMINAL-LSPC15MF'})]),
                            FakeStream('Found it.')])
         said = []
         async def on_text(d): said.append(d)
@@ -55,7 +56,7 @@ class SpokenTextTests(unittest.TestCase):
         convo = Conversation(CLAUDE_CFG, lambda: 'system', lambda: app.tool_specs(CLAUDE_CFG), run_tool, on_text)
         with patch.object(claude_reply.anthropic, 'AsyncAnthropic', return_value=fake):
             kind, text = asyncio.run(convo.respond('Black screen, orange button.'))
-        self.assertEqual(text, 'Let me check. Found it.')
+        self.assertEqual(text, "That's the LSPC15mf. Found it.")
         self.assertEqual(''.join(said), text)
 
 

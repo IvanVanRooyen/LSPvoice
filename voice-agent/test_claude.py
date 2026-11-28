@@ -79,7 +79,8 @@ class ClaudeTests(unittest.TestCase):
         with patch.object(app, 'lookup', return_value={'device_found': True, 'lookup_source': 'static_inventory'}) as lookup:
             received = self.call(fake, 'Royal Adelaide, bed 7G13101.')
         lookup.assert_called_once_with('RAH', '7G13101', '')
-        self.assertEqual(received[0]['token'], 'Found it. Payment status is unknown.'); self.assertTrue(received[-1]['last'])
+        spoken = ''.join(r['token'] for r in received if r.get('type') == 'text')
+        self.assertEqual(spoken, 'Found it. Payment status is unknown.'); self.assertTrue(received[-1]['last'])
         first, second = fake.requests
         self.assertEqual(first['model'], 'claude-sonnet-5-5')
         self.assertEqual(first['output_config'], {'effort': 'low'})
@@ -106,9 +107,11 @@ class ClaudeTests(unittest.TestCase):
     def test_later_turns_replay_text_only_and_skip_empty_interrupted_turns(self):
         fake = FakeClient([FakeStream('Which hospital?'), FakeStream('Thanks.')])
         self.call(fake, 'Hello.', 'Royal Adelaide.')
-        self.assertEqual(fake.requests[1]['messages'],
-                         [{'role': 'user', 'content': 'Hello.'}, {'role': 'assistant', 'content': 'Which hospital?'},
-                          {'role': 'user', 'content': 'Royal Adelaide.'}])
+        # The call details (reference) are a system message after the first caller turn, kept for the call.
+        messages = fake.requests[1]['messages']
+        self.assertEqual([m['role'] for m in messages], ['user', 'system', 'assistant', 'user'])
+        self.assertIn("this call's reference is", messages[1]['content'])
+        self.assertEqual([m['content'] for m in messages if m['role'] != 'system'], ['Hello.', 'Which hospital?', 'Royal Adelaide.'])
         history = [{'role': 'user', 'content': 'Hi'}, {'role': 'assistant', 'content': ''}, {'role': 'user', 'content': 'Bed 1'}]
         empty = FakeClient([FakeStream('OK.')])
         with patch.object(claude_reply.anthropic, 'AsyncAnthropic', return_value=empty):

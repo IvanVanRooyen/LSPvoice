@@ -440,7 +440,8 @@ def add_scenario(scenario):
     if any(s['id'] == scenario['id'] for s in data['scenarios']):
         raise SystemExit(f"{scenario['id']} is already in scenarios.json.")
     data['scenarios'].append(scenario)
-    SCENARIOS.write_text(json.dumps(data, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
+    # newline='\n': LF on Windows too, like every other file in the repository.
+    SCENARIOS.write_text(json.dumps(data, indent=2, ensure_ascii=False) + '\n', encoding='utf-8', newline='\n')
 
 
 def select(scenarios, only, tag):

@@ -58,12 +58,27 @@ class SpokenText:
         return rest
 
 
+_SENTENCE_END = '.!?'
+# A turn that opens like this is the model describing its next step, not answering: hold it like
+# later text (dropped if a tool call follows, spoken if not).
+_NARRATION_START = re.compile(
+    r"(?:(?:ok(?:ay)?|sure|alright|right|great|thanks|thank you)[,.!]?\s+)?"
+    r"(?:let me|let's|i'll|i will|i'm going to|i am going to|i'm just|i'm now|now i'll|one moment|just a moment|"
+    r"give me a moment|bear with me)\b", re.IGNORECASE)
+_DECIDE_AFTER = 25  # characters of the opening looked at before the first word is spoken (~50 ms)
+FLOW_ENDED_NOTE = "Flow status from LSPcare's own system: the flow has ended; earlier flow status notes no longer apply."
+
+
 class Conversation:
-    def __init__(self, cfg, system, specs, run_tool, on_text, on_event=None, on_usage=None, session=None, note=None):
+    def __init__(self, cfg, system, specs, run_tool, on_text, on_event=None, on_usage=None, session=None, note=None,
+                 context=None):
         """system and specs are callables, rebuilt each turn so knowledge checks run every time.
 
         session (the call's state dict) gets a caller-turn counter used by the flow engine;
-        note() returns the active flow's step note, appended to each request while a flow runs.
+        note() returns the active flow's step note. When it changes, it is sent at the start of the
+        next turn as a system message and kept in history (append-only: earlier notes are never removed).
+        context: call details for the model (for example the call reference), sent once with the
+        first turn as a system message and kept.
         """
         self.cfg = cfg
         self.system = system
@@ -74,6 +89,9 @@ class Conversation:
         self.on_usage = on_usage
         self.session = session if session is not None else {}
         self.note = note
+        self.context = context
+        self._context_stored = False
+        self._last_note = None
         self.history = []
         self.partial = ''
         self.last_assistant = None
@@ -83,8 +101,70 @@ class Conversation:
         if self.on_event:
             self.on_event(kind, data)
 
+    def _turn_system(self):
+        """System text for this turn: call details (first turn) and the flow note when it changed."""
+        parts = [self.context] if self.context and not self._context_stored else []
+        note = self.note() if self.note else None
+        if note and note != self._last_note:
+            parts.append(note)
+        elif not note and self._last_note and self._last_note != FLOW_ENDED_NOTE:
+            note = FLOW_ENDED_NOTE  # so the stored notes of a finished flow are not followed
+            parts.append(note)
+        else:
+            note = self._last_note
+        return ('\n\n'.join(parts) or None), note
+
+    # Spoken text passes a gate: the first sentence of a turn is spoken as it streams; after it,
+    # text is held until the model's round ends. If the round ends in a tool call the held text was
+    # narration ("I'll record that now") and is dropped; otherwise it is the answer and is spoken.
+    # This keeps the first word as quick as before while narration between tool calls is never heard.
+    def _gate(self, text):
+        if self._holding:
+            self._held += text
+            return ''
+        if self._deciding:  # the turn's opening words decide whether its first sentence may stream
+            self._opening += text
+            if len(self._opening) < _DECIDE_AFTER and not any(c in _SENTENCE_END for c in self._opening):
+                return ''
+            text = self._decide()
+            if self._holding:
+                return ''
+        out = []
+        for i, ch in enumerate(text):
+            if ch.isspace() and self._last_char in _SENTENCE_END:
+                self._holding = True
+                self._held += text[i:]
+                break
+            out.append(ch)
+            self._last_char = ch
+        return ''.join(out)
+
+    def _decide(self):
+        """Called once per turn with the opening words: narration is held, anything else streams."""
+        text, self._opening, self._deciding = self._opening, '', False
+        if _NARRATION_START.match(text.lstrip()):
+            self._holding = True
+            self._held += text
+            return ''
+        return text
+
     async def _speak(self, delta):
-        await self._say(self._spoken.feed(delta))
+        await self._say(self._gate(self._spoken.feed(delta)))
+
+    async def _round_end(self, tool_used):
+        tail = self._spoken.flush()
+        if tail:
+            await self._say(self._gate(tail))
+        if self._deciding and self._opening:  # a short round: decide on what there is
+            opening = self._decide()
+            if opening:
+                await self._say(self._gate(opening))
+        held, self._held = self._held, ''
+        if tool_used:
+            if held.strip():
+                self._emit('suppressed', text=held.strip(), reason='narration before a tool call')
+        elif held:
+            await self._say(held)
 
     async def _say(self, delta):
         if not delta:
@@ -102,20 +182,16 @@ class Conversation:
         await self.on_text(delta)
 
     async def _tool(self, name, args):
-        tail = self._spoken.flush()
-        if tail:
-            await self._say(tail)
         self._after_tool = True
         self._timing['tools'].append(name + (':' + args['guide_id'] if name == 'get_guide' else ''))
         result = await self.run_tool(name, args)
         spoken = self.partial.rstrip()
         if isinstance(result, dict) and spoken.endswith('?'):
             # The reply already ended with a question before this tool ran (the model spoke, then
-            # used a tool). The tool's next-step instruction would make it ask again, so tell it,
-            # and drop anything more it says in this reply (enforced in _say).
+            # used a tool). Tell it, as data, and drop anything more it says in this reply (enforced
+            # in _say). No instruction goes in a tool result: those can look like a prompt injection.
             question = re.split(r'(?<=[.!?])\s+', spoken)[-1]
-            result = {**result, 'already_asked_caller': question,
-                      'say_next': 'Nothing more in this reply: wait for the caller to answer that question.'}
+            result = {**result, 'already_asked_caller': question}
             self._question_pending = True
         self._emit('tool', name=name, args=args, result=result)
         return result
@@ -130,21 +206,24 @@ class Conversation:
         self._after_tool = False
         self._question_pending = False
         self._suppressed = ''
+        self._holding, self._held, self._last_char = False, '', ''
+        self._deciding, self._opening = True, ''
         self._timing = {'started': time.monotonic(), 'first': None, 'tools': []}
         self._emit('caller', text=text)
         system, specs = self.system(), self.specs()
-        exchange = []  # this turn's tool calls/results (Claude path), kept so later turns can see them
+        turn_system, note = self._turn_system()
+        exchange = []  # this turn's system note, tool calls and results, kept so later turns can see them
         if self.cfg.get('provider') == 'anthropic':
             kind, value = await claude_reply.reply(self.cfg, system, self.history, specs, self._tool,
                                                    self._speak, on_usage=self.on_usage, exchange=exchange,
-                                                   note=self.note)
+                                                   note=turn_system, on_round_end=self._round_end)
         else:
-            kind, value = await self._openai(system, specs)
-        tail = self._spoken.flush()
-        if tail:
-            await self._say(tail)
+            kind, value = await self._openai(system, specs, turn_system)
+            if turn_system:
+                exchange.append({'role': 'system', 'content': turn_system})
+        await self._round_end(False)  # anything still held (OpenAI path) is the answer
         if self._suppressed.strip():
-            self._emit('suppressed', text=self._suppressed.strip())
+            self._emit('suppressed', text=self._suppressed.strip(), reason='question already asked')
             flow = self.session.get('flow')
             if flow and flow.get('readback') and flow.get('readback_turn') == self.session.get('caller_turns'):
                 flow['readback'] = None  # the caller never heard it: a new read-back must be said first
@@ -158,7 +237,10 @@ class Conversation:
             return kind, value
         if not self.partial:
             raise ValueError('No complete answer returned')
+        # Stored only for a completed turn: a system message must be followed by an assistant turn.
         self.history.extend(exchange)
+        self._context_stored = True
+        self._last_note = note
         self.history.append({'role': 'assistant', 'content': self.partial})
         self.last_assistant = len(self.history) - 1
         return 'text', self.partial
@@ -176,16 +258,14 @@ class Conversation:
     def discard_partial(self):
         self.partial = ''
 
-    async def _openai(self, system, specs):
+    async def _openai(self, system, specs, turn_system=None):
         cfg = self.cfg
-        inputs = list(self.history)
-        last_note = None
+        inputs = [{'role': 'developer' if m['role'] == 'system' else m['role'], 'content': m['content']}
+                  for m in self.history if isinstance(m.get('content'), str)]
+        if turn_system:
+            inputs.append({'role': 'developer', 'content': turn_system})
         async with AsyncOpenAI(api_key=cfg['openai_api_key'], max_retries=0, timeout=25) as client:
             for round_number in range(4):
-                current_note = self.note() if self.note and round_number == 0 else None
-                if current_note and current_note != last_note:
-                    inputs.append({'role': 'developer', 'content': current_note})
-                    last_note = current_note
                 options = {'reasoning': {'effort': 'none'}} if cfg['model'] == 'gpt-6.1-terra' else {}
                 async with client.responses.stream(model=cfg['model'], instructions=system, input=inputs,
                                                    tools=tools.openai_tools(specs), store=False,
@@ -195,6 +275,7 @@ class Conversation:
                             await self._speak(event.delta)
                     result = await stream.get_final_response()
                 calls = [x for x in result.output if x.type == 'function_call']
+                await self._round_end(any(c.name != 'finish_call' for c in calls))
                 if not calls:
                     return 'text', self.partial
                 inputs.extend(result.output)

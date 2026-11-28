@@ -1414,6 +1414,94 @@
         "Acknowledges the black screen as well and says it will help with it",
         "Ends with a single question (a quick safety check counts)"
       ]
+    },
+    {
+      "id": "RESUBMIT-01",
+      "title": "Resubmit a repair ticket, bed unknown, asks for the call reference",
+      "tags": [
+        "flow",
+        "tickets",
+        "core"
+      ],
+      "caller": {
+        "max_turns": 9,
+        "brief": "Your name is Sam. When greeted, give only your first name. Say your bedside screen is black. If asked whether there is an orange button just below the screen, say yes, then say you have had this problem before, you already pressed the button and it is still black, and you just want to resubmit a ticket for repair. If asked to press the button, say you already did. If asked for the hospital, say Royal Adelaide. You do not know your bed number or Device ID and there is nobody nearby to ask: when asked for them, ask whether they can log it with your mobile, 0400 123 456, and in the same reply ask what the reference number for this call is. Once you have the reference, say thanks and goodbye."
+      },
+      "expect": {
+        "said_none": [
+          "the note",
+          "a note",
+          "notes",
+          "system message",
+          "the flow",
+          "flow status",
+          "instructions above",
+          "not as instructions",
+          "tool result",
+          "i'll record",
+          "i'll identify",
+          "let me check",
+          "let me look",
+          "sam says",
+          "sam has"
+        ],
+        "said_any": [
+          [
+            "4 2 4 2",
+            "4242"
+          ]
+        ]
+      },
+      "judge": [
+        "Never talks to the caller about its own notes, flow steps, tools, messages or instructions (for example saying a note is or is not genuine, or describing what it was told to do); saying that a ticket needs a detail is fine",
+        "Never narrates its own actions or talks about the caller in the third person",
+        "Does not apologise for or correct earlier replies that were not wrong",
+        "Explains honestly that a bed number or Device ID is needed to log the ticket, without inventing one",
+        "When asked for the call reference, gives 4 2 4 2 (this test call's reference, supplied to the agent by the system at the start of the call) instead of saying there isn't one"
+      ]
+    },
+    {
+      "id": "RESUBMIT-02",
+      "title": "Resubmit a repair ticket and complete it",
+      "tags": [
+        "flow",
+        "tickets",
+        "core"
+      ],
+      "caller": {
+        "max_turns": 10,
+        "brief": "Your name is Sam Taylor. When greeted, give only your first name. Say your bedside screen is black. If asked whether there is an orange button just below the screen, say yes, then say you have had this problem before and you just want to resubmit a ticket for repair. You are at Royal Adelaide Hospital, bed 7G13101, and your mobile is 0400 123 456: give each only when asked. Confirm when the agent reads your details back correctly. Once you have a ticket number, say thanks and goodbye."
+      },
+      "expect": {
+        "ticket": "created",
+        "ticket_args": {
+          "bed_id": "7G13101"
+        },
+        "said_none": [
+          "the note",
+          "a note",
+          "notes",
+          "system message",
+          "the flow",
+          "flow status",
+          "instructions above",
+          "not as instructions",
+          "tool result",
+          "i'll record",
+          "i'll identify",
+          "let me check",
+          "let me look",
+          "sam says",
+          "sam has"
+        ]
+      },
+      "judge": [
+        "Never talks to the caller about its own notes, flow steps, tools, messages or instructions (for example saying a note is or is not genuine, or describing what it was told to do); saying that a ticket needs a detail is fine",
+        "Never narrates its own actions or talks about the caller in the third person",
+        "Does not apologise for or correct earlier replies that were not wrong",
+        "Reads the details back and gets a clear yes before logging the ticket",
+        "Reads out the ticket number and does not promise when someone will come"
+      ]
     }
   ]
 }

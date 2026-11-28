@@ -13,8 +13,8 @@ both with the real names (kept out of this repository).
 
 | Service | What it does | Reachable from |
 |---|---|---|
-| `agent` | The voice agent (`app.py`, one worker) | Only the tunnel container (no port on the server) |
-| `cloudflared` | Cloudflare named tunnel: `https://voice.example.com` → `http://agent:8101` | Outbound connection to Cloudflare only |
+| `agent` | The voice agent (`app.py`, one worker) | `127.0.0.1:8101` on the server, and the tunnel container |
+| `cloudflared` | Optional (profile `tunnel`): Cloudflare named tunnel `https://voice.example.com` → `http://agent:8101` | Outbound connection to Cloudflare only |
 | `dashboard` | The admin dashboard, with knowledge/flow/scenario editing **off** | `127.0.0.1:8102` on the server only, through SSH |
 
 Data lives outside the image, in `./data` next to `compose.yaml` (or `LSPCARE_DATA`):
@@ -48,7 +48,11 @@ git clone <repository URL> ~/lspvoice && cd ~/lspvoice
 
 ## 3. Cloudflare named tunnel
 
-In the Cloudflare dashboard: **Zero Trust → Networks → Tunnels → Create a tunnel → Cloudflared**.
+**If the server already runs `cloudflared`** for its own tunnel, add a public hostname to that
+tunnel instead: `voice` . `example.com`, service **HTTP**, URL `127.0.0.1:8101` (no Access).
+Leave `TUNNEL_TOKEN` empty in `.env` (`cp .env.example .env && chmod 600 .env`) and skip to step 4.
+
+**Otherwise**, use the `cloudflared` container. In the Cloudflare dashboard: **Zero Trust → Networks → Tunnels → Create a tunnel → Cloudflared**.
 Name it (e.g. `lspvoice`) and copy the **token** from the install command shown (the long value
 after `--token`). Then add a **public hostname** (also called a published application route):
 
@@ -83,7 +87,7 @@ rm -rf ~/private-config-incoming
 
 ```sh
 export GIT_COMMIT=$(git rev-parse --short HEAD)
-docker compose up -d --build
+docker compose up -d --build                  # with the container tunnel: docker compose --profile tunnel up -d --build
 docker compose ps            # agent and dashboard should become "healthy"
 docker compose logs -f agent
 ```
@@ -139,7 +143,7 @@ whether tickets should be `live` or `dry_run` (Settings).
 
 | Symptom | Likely cause |
 |---|---|
-| Caller hears "an application error has occurred"; Twilio debugger shows 11200 | Tunnel down (`docker compose ps`, `logs cloudflared`), wrong route (must be `http://agent:8101`), or Cloudflare security challenging Twilio: check Security → Events for the hostname; turn off Bot Fight Mode or add a WAF skip rule for it |
+| Caller hears "an application error has occurred"; Twilio debugger shows 11200 | Tunnel down (`docker compose ps`, `logs cloudflared`), wrong route (`http://127.0.0.1:8101` for the server's own cloudflared, `http://agent:8101` for the container), or Cloudflare security challenging Twilio: check Security → Events for the hostname; turn off Bot Fight Mode or add a WAF skip rule for it |
 | Agent answers but every call fails at once, log shows 403 | Saved public URL does not match the address Twilio calls: repeat step 6 |
 | `agent` unhealthy or restarting | `docker compose logs agent`. "readable by others" or permission errors: repeat the `chown`/`chmod` in step 4 |
 | Dashboard says "Local dashboard only." | Open exactly `http://localhost:8102` through the SSH tunnel |

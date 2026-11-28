@@ -10,7 +10,7 @@ import ssl
 import sys
 import time
 from urllib.parse import urlsplit
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'mock-backend'))
 from private_files import make_private_dir, private_path, restrict
@@ -112,7 +112,7 @@ def wait_until_public(base, seconds=180):
     host = urlsplit(base).hostname
     while True:
         try:
-            with urlopen(base + '/health', timeout=5) as response:
+            with urlopen(Request(base + '/health', headers={'User-Agent': 'lspvoice-configure'}), timeout=5) as response:
                 if json.load(response).get('service') == SERVICE:
                     return
         except (OSError, ValueError):

@@ -40,35 +40,37 @@ def request_options(cfg):
     return options
 
 
-async def reply(cfg, system, history, tool_specs, run_tool, on_text, on_usage=None, exchange=None, note=None):
+async def reply(cfg, system, history, tool_specs, run_tool, on_text, on_usage=None, exchange=None, note=None,
+                on_round_end=None):
     """Return ('text', spoken) or ('finish', reason).
 
-    history holds earlier turns: text turns, plus the tool calls and results of earlier turns.
-    exchange (a list) receives this turn's tool calls and results, so the caller can keep them
-    in history: without them the model forgets it already looked a bed up or opened a guide.
+    history holds earlier turns: text turns, the tool calls and results of earlier turns, and the
+    system messages (flow notes, call details) sent in earlier turns.
+    exchange (a list) receives this turn's system note, tool calls and results, so the caller can
+    keep them in history: without them the model forgets it already looked a bed up or opened a
+    guide, and sees its own remarks about notes that are no longer there. History is append-only.
     Thinking blocks are not kept across turns (allowed by the API; avoids history-edit checks).
     on_usage(model, usage) is called after every API response (used by the test harness for cost).
-    note() returns the active flow's current step (or None). It is appended once, at the start of
-    the turn, as a mid-conversation system message after the caller's words; notes are not kept in
-    history, so the cached rules and tools stay unchanged.
+    note (text or None) is sent once, at the start of the turn, as a mid-conversation system
+    message after the caller's words: never after a tool result, where the model can mistake
+    instructions for a prompt injection.
+    on_round_end(tool_used) is awaited after each response, before any tool runs, so the caller can
+    decide whether text held back from that round is spoken (an answer) or dropped (narration).
     """
     # An interruption before any word was heard leaves an empty assistant turn; the API rejects those.
     messages = [{'role': m['role'], 'content': m['content']} for m in history if m['content']]
+    if note:
+        messages.append({'role': 'system', 'content': note})
+        if exchange is not None:
+            exchange.append({'role': 'system', 'content': note})
     definitions = tools.anthropic_tools(tool_specs)
     options = request_options(cfg)
     spoken = ''
     json_retries = 0
     async with anthropic.AsyncAnthropic(api_key=cfg['anthropic_api_key'], max_retries=0, timeout=25) as client:
         rounds = 0
-        last_note = None
         while rounds < ROUNDS:
             said_this_round = ''
-            # Only at the start of the turn: mid-turn, the flow tools' results carry the updated step,
-            # and notes after every tool result can make the model treat them as suspicious.
-            current_note = note() if note and rounds == 0 and json_retries == 0 else None
-            if current_note and current_note != last_note:
-                messages.append({'role': 'system', 'content': current_note})
-                last_note = current_note
             try:
                 async with client.beta.messages.stream(
                         max_tokens=16000, system=system, messages=messages, tools=definitions,
@@ -95,6 +97,8 @@ async def reply(cfg, system, history, tool_specs, run_tool, on_text, on_usage=No
                 category = getattr(getattr(message, 'stop_details', None), 'category', None)
                 raise RuntimeError(f'Claude declined the turn (category {category})')
             uses = [block for block in message.content if block.type == 'tool_use']
+            if on_round_end:  # words said together with finish_call are the goodbye, not narration
+                await on_round_end(any(block.name != 'finish_call' for block in uses))
             if not uses:
                 return 'text', spoken
             if message.stop_reason == 'max_tokens':

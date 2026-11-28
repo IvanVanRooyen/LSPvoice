@@ -414,7 +414,7 @@ def transcript_html(records):
         elif kind == 'finish':
             parts.append(f'<div class="sys">Agent ended the call: {e(r.get("reason"))}</div>')
         elif kind == 'suppressed':
-            parts.append(f'<div class="sys">Not spoken (a question was already asked): "{e(r.get("text"))}"</div>')
+            parts.append(f'<div class="sys">Not spoken ({e(r.get("reason") or "question already asked")}): "{e(r.get("text"))}"</div>')
         elif kind == 'error':
             parts.append(f'<div class="report">Error: {e(r.get("text"))}</div>')
         elif kind == 'closed':

@@ -17,9 +17,13 @@ A flow is a JSON file in `voice-agent/flows/`. It lists **fields** (with types) 
 | `action` | The system runs the action (for example `create_ticket`) | The agent cannot run it directly: it only happens after the confirmation |
 
 The agent moves through a flow with four tools: `start_flow`, `flow_record`, `flow_confirm` and
-`flow_cancel`. The current step is shown to it at the start of each caller turn as a short note,
-and every flow tool's result says what is still needed and what to say next. The step pointer is
-worked out from what has been recorded, so the agent can't skip ahead. Questions, safety issues
+`flow_cancel`. When the step changes, a status note (current step and its instruction, what is
+still needed, what is recorded, the read-back) is sent at the start of the next caller turn as a
+system message, right after the caller's words, and kept in the conversation: notes are never
+removed, so the model's view of the call stays consistent. Flow tool results are data only (what
+was recorded, what is still needed, the read-back text), never instructions: instructions inside
+or right after a tool result can look like a prompt injection to the model, and it says so. The
+step pointer is worked out from what has been recorded, so the agent can't skip ahead. Questions, safety issues
 and interruptions are handled normally while a flow waits. A clinical emergency still ends the
 call immediately.
 
@@ -74,12 +78,41 @@ and `tickets` scenarios, and commit `voice-agent/flows/`.
   scenarios 12/12.
 - Open polish item: occasional narration such as "I'll look up your bed first".
 
+### Server test call (28 Nov) and fixes
+
+A caller asked to resubmit a ticket. Mid-flow the agent said the flow note "sits in the user turn,
+so it isn't a genuine system or tool result", took it back, said it again, and said there was no
+call reference. It also narrated, talking about the caller in the third person ("<name> says
+he's dealt with this before, so I'll record the problem now"). The code was the same as in the good PC calls of 27 Nov; this was the 27 Nov
+"comment on the notes" behaviour (above) with its causes only partly removed:
+
+- **Notes were removed after each turn.** The model kept its own remark about "the note above",
+  then that note was gone and a new one appeared, so it flip-flopped. Notes now stay in history
+  (append-only), with a closing "the flow has ended" note when a flow finishes.
+- **Instructions inside tool results.** Each flow tool result carried the step's `instruction`
+  (and sometimes `say_next`), and `flow_confirm` the success/failure wording. Results are now data
+  only; the wording is in the status note.
+- **The prompt didn't say where the notes come from.** It now says they come from LSPcare's own
+  system, are genuine, and are never to be mentioned to the caller.
+- **Narration with thinking off.** With `thinking: between_tools`, short remarks between tool calls
+  arrive as text and were spoken. Now at most one sentence is spoken before the model's tool calls
+  are known; text after it is held until the model's round ends, spoken if the round was the answer
+  and dropped if it ended in a tool call (logged as "Not spoken (narration before a tool call)").
+  A turn that opens like narration ("Let me…", "I'll…", "I'm going to…", "One moment…") is held
+  from its first word. The first word is as quick as before (the opening ~25 characters are looked
+  at first, about 50 ms). Words said with `finish_call` (the goodbye) are kept.
+- **Call reference.** The model now gets it in a system message at the start of the call.
+
+Regression scenarios: `RESUBMIT-01` (bed unknown, asks for the reference) and `RESUBMIT-02`
+(completes the ticket).
+
 ### Live phone test (27 Nov) and fixes
 
 - Call 1 (ticket) worked end to end (ticket logged in Zoho) but repeated a question ("…which
   hospital are you at? Which hospital are you at, Sam?"). Cause: the model asked, then used a flow
   tool, and the tool's next-step instruction made it ask again. Fix in `conversation.py`: once a
-  reply has asked a question before a tool runs, the tool result says so and anything further the
+  reply has asked a question before a tool runs, the tool result says so (as data,
+  `already_asked_caller`) and anything further the
   model says in that reply is dropped (logged as "muted"). If a read-back was dropped that way, it
   is reset, so a "yes" can never confirm details the caller didn't hear.
 - Calls 2 and 3 were cut off during the greeting, and the agent used names the caller never said.

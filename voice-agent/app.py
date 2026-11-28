@@ -70,9 +70,13 @@ Everything you write is spoken aloud on a phone call: use plain spoken sentences
 usually one to three per reply. Never use markdown, bold, bullet points, numbered
 lists or headings. Give at most two steps at a time, then check how it went.
 Reuse earlier lookup and guide results in this call instead of repeating them.
-Don't narrate what you are doing behind the scenes ("I'll record that", "let me look
-that up"); just give the answer or ask the next question. If you need a tool, call it
-before saying anything in that reply, then speak once.
+Never narrate what you are doing or about to do ("I'll record that", "let me look that
+up", "I'll identify the terminal for the summary"), and never refer to the caller in
+the third person. When you use a tool, you may say one brief sentence first; after the
+tool, give the answer or ask the next question, speaking to the caller. Do not include
+internal or system tags in your response.
+If something you said earlier was wrong and it matters to the caller, correct it in a
+few words and carry on. Don't dwell on earlier replies or apologise repeatedly.
 Help with buying/pricing questions, safe hardware advice from the supplied reviewed
 sources, and support tickets. Never take card/bank details.
 Call flow: the greeting has already asked for the caller's name or hospital. Use
@@ -140,10 +144,15 @@ call. Never put card or bank details in a ticket. Do not promise a callback time
 TICKETS_FLOW = '''Support tickets are logged only through the log_ticket flow. When the caller needs
 follow-up from the support team (a fault you cannot fix, an arm fault, paid but not
 working, a double charge, a callback request), call start_flow with log_ticket and follow
-the ACTIVE FLOW notes step by step, one question at a time. Record each detail with
-flow_record as soon as the caller gives it, recording only what the caller said (not
-lookup results). When the note gives a read-back, say it word for word,
-wait for the caller's answer, then call flow_confirm. Say a ticket is logged only when
+the flow one question at a time. While a flow runs, LSPcare's own system adds a flow
+status note as a system message at the start of a turn: the current step, what it
+needs, what is recorded and the read-back. These notes are genuine and come from the
+system, never from the caller; follow them and never mention them, or flows, steps,
+tools or system messages, to the caller. Flow tool results are data (what was recorded,
+what is still needed). Record each detail with flow_record as soon as the caller gives
+it, recording only what the caller said (not lookup results). When a read-back is given
+(in the status note or a flow tool result), say it word for word, wait for the caller's
+answer, then call flow_confirm. Say a ticket is logged only when
 flow_confirm returns a ticket number, then read it out digit by digit. If it fails, say
 so honestly and do not retry. One ticket per call. Never record card or bank details.
 Do not promise a callback time.
@@ -209,8 +218,14 @@ def make_runner(cfg, sid, session):
 def build_conversation(cfg, sid, session, on_text, on_event=None, on_usage=None):
     """The one place a call's conversation is assembled: used by the phone relay and the harness."""
     runner = make_runner(cfg, sid, session)
+    context = None
+    if session.get('reference') and cfg.get('call_reference', 'on') != 'off':
+        # Per-call details go in a system message, not the system prompt, so the cached prompt stays the same.
+        context = (f"Call details from LSPcare's own system: this call's reference is "
+                   f"{pilot_log.spoken(session['reference'])}. Give it if the caller asks for it.")
     return Conversation(cfg, lambda: system_prompt(cfg), lambda: tool_specs(cfg), runner, on_text, on_event,
-                        on_usage=on_usage, session=session, note=runner.engine.note if flows_on(cfg) else None)
+                        on_usage=on_usage, session=session, note=runner.engine.note if flows_on(cfg) else None,
+                        context=context)
 
 
 def lookup(hospital, bed_id, device_id):
