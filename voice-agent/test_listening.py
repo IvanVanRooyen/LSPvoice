@@ -1,5 +1,6 @@
 """Offline tests: caller answers are never lost to echo filtering, relay messages are logged, and a
 silent caller is asked again once. Server test call of 28 Nov: "Royal Adelaide" never arrived."""
+import contextlib
 import io
 import json
 from pathlib import Path
@@ -120,10 +121,53 @@ class RelayListeningTests(unittest.TestCase):
         self.assertEqual([e['type'] for e in relay], ['setup'] + ['info'] * 5 + ['something-new', 'prompt'])
         self.assertNotIn('customParameters', relay[0]); self.assertNotIn('nonce', json.dumps(relay))
 
+    def fast(self, words_per_second=1000.0, grace=0.05):
+        stack = contextlib.ExitStack()
+        for name, value in [('SILENCE_SECONDS', 0.3), ('PLAYBACK_MARGIN', 0.0), ('WORDS_PER_SECOND', words_per_second),
+                            ('EVENT_GRACE', grace)]:
+            stack.enter_context(patch.object(listening, name, value))
+        return stack
+
+    def speaking(self, ws, value):
+        ws.send_json({'type': 'info', 'name': 'agentSpeaking', 'value': value})
+
+    def test_re_ask_timed_from_agent_speaking_off(self):
+        # Ref 6081: the re-ask came ~5 s late, timed from an estimate. Twilio says when playback ends.
+        nonce = self.call([FakeStream(QUESTION), FakeStream('Thanks.')])
+        with self.fast(words_per_second=0.01), self.ws() as ws:  # the estimate alone would be minutes
+            self.setup(ws, nonce)
+            ws.send_json({'type': 'prompt', 'last': True, 'voicePrompt': "It's Sam."})
+            self.assertEqual(self.reply(ws)[0], QUESTION)
+            self.speaking(ws, 'on'); time.sleep(0.5)  # still playing: no re-ask yet
+            self.speaking(ws, 'off'); off = time.monotonic()
+            self.assertTrue(self.reply(ws)[0].startswith("Sorry, I didn't catch that."))
+            self.assertLess(time.monotonic() - off, 1.5)
+            waited = time.monotonic() - off
+            ws.send_json({'type': 'prompt', 'last': True, 'voicePrompt': 'Royal Adelaide.'})
+            self.reply(ws)
+        self.assertGreaterEqual(waited, 0.3)
+        self.assertEqual([e['timed_from'] for e in self.events() if e['kind'] == 'silence'], ['playback_event'])
+
+    def test_agent_speaking_again_restarts_the_wait(self):
+        nonce = self.call([FakeStream(QUESTION), FakeStream('Thanks.')])
+        with self.fast(words_per_second=0.01), self.ws() as ws:
+            self.setup(ws, nonce)
+            ws.send_json({'type': 'prompt', 'last': True, 'voicePrompt': "It's Sam."})
+            self.reply(ws)
+            self.speaking(ws, 'on'); self.speaking(ws, 'off')
+            time.sleep(0.15); self.speaking(ws, 'on')  # playback resumed inside the silence window
+            time.sleep(0.6)
+            self.speaking(ws, 'off'); off = time.monotonic()
+            self.assertTrue(self.reply(ws)[0].startswith("Sorry, I didn't catch that."))
+            waited = time.monotonic() - off
+            ws.send_json({'type': 'prompt', 'last': True, 'voicePrompt': 'Royal Adelaide.'})
+            self.reply(ws)
+        self.assertGreaterEqual(waited, 0.3)  # counted from the second "off", not the first
+        self.assertEqual([e['kind'] for e in self.events()].count('reprompt'), 1)
+
     def test_silent_caller_is_asked_again_once(self):
         nonce = self.call([FakeStream(QUESTION), FakeStream('Thanks. What is your bed number?')])
-        with patch.object(listening, 'SILENCE_SECONDS', 0.3), patch.object(listening, 'PLAYBACK_MARGIN', 0.0), \
-                patch.object(listening, 'WORDS_PER_SECOND', 1000.0), self.ws() as ws:
+        with self.fast(), self.ws() as ws:  # no speaker events: the estimate is the fallback
             self.setup(ws, nonce)
             greeting_again, _ = self.reply(ws)  # nothing said after the greeting
             self.assertEqual(greeting_again, app.GREETING_REPROMPT)
@@ -139,14 +183,15 @@ class RelayListeningTests(unittest.TestCase):
         self.assertEqual([m['role'] for m in history][-3:], ['assistant', 'assistant', 'user'])  # the re-ask is in history
         self.assertTrue(history[-2]['content'].startswith("Sorry, I didn't catch that."))
         self.assertEqual([e['kind'] for e in self.events()].count('reprompt'), 2)  # greeting + question
+        self.assertEqual({e['timed_from'] for e in self.events() if e['kind'] == 'silence'}, {'estimate'})
 
     def test_caller_speaking_cancels_the_re_ask(self):
         nonce = self.call([FakeStream(QUESTION), FakeStream('Thanks. What is your bed number?')])
-        with patch.object(listening, 'SILENCE_SECONDS', 0.3), patch.object(listening, 'PLAYBACK_MARGIN', 0.0), \
-                patch.object(listening, 'WORDS_PER_SECOND', 1000.0), self.ws() as ws:
+        with self.fast(), self.ws() as ws:
             self.setup(ws, nonce)
             ws.send_json({'type': 'prompt', 'last': True, 'voicePrompt': "It's Sam."})
             self.assertEqual(self.reply(ws)[0], QUESTION)
+            self.speaking(ws, 'on'); self.speaking(ws, 'off')
             ws.send_json({'type': 'info', 'name': 'clientSpeaking', 'value': 'on'})
             time.sleep(0.8)
             ws.send_json({'type': 'prompt', 'last': True, 'voicePrompt': 'Royal Adelaide.'})

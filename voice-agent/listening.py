@@ -6,11 +6,14 @@ can vanish with no message at all, so it is off. In its place this module checks
 the case echo actually causes: a longer prompt that arrives while (or just after) the agent was
 speaking and repeats the agent's own words in order. Short answers are never treated as echo.
 
-Twilio documents no "playback finished" message, so playback time is estimated from the words sent.
+The silence timer starts when Twilio reports the agent stopped speaking (speaker events:
+{"type": "info", "name": "agentSpeaking", "value": "off"}); playback time estimated from the words
+sent is only a fallback for when those events don't arrive, and is still used by the echo check.
 """
 import re
 
-SILENCE_SECONDS = 9.0       # after the agent's question has finished playing
+SILENCE_SECONDS = 9.0       # after the agent's question has finished playing (Twilio's agentSpeaking "off")
+EVENT_GRACE = 2.0           # how long past the estimated end to wait for that event before using the estimate
 WORDS_PER_SECOND = 2.6      # ElevenLabs at normal pace, about 155 words a minute
 PLAYBACK_MARGIN = 0.8       # TTS start-up and the gap before the first word
 ECHO_MIN_WORDS = 4          # shorter prompts are always the caller's (names, yes/no, bed numbers)

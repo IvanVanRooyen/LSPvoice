@@ -20,9 +20,13 @@ The agent moves through a flow with four tools: `start_flow`, `flow_record`, `fl
 `flow_cancel`. When the step changes, a status note (current step and its instruction, what is
 still needed, what is recorded, the read-back) is sent at the start of the next caller turn as a
 system message, right after the caller's words, and kept in the conversation: notes are never
-removed, so the model's view of the call stays consistent. Flow tool results are data only (what
-was recorded, what is still needed, the read-back text), never instructions: instructions inside
-or right after a tool result can look like a prompt injection to the model, and it says so. The
+removed, so the model's view of the call stays consistent. Flow tool results are data only (the
+step, the field names still needed, what was recorded, the read-back text, and short codes such as
+`mentions_the_caller` or `readback_not_answered` for anything not accepted), never instructions or
+examples: instructions inside or right after a tool result can look like a prompt injection to the
+model, and it says so, or reads them out. How to ask for each field is in the status note; what
+each code means is in the system prompt. Punctuation that can't be read aloud (brackets,
+semicolons, colons) is fixed in code rather than sent back. The
 step pointer is worked out from what has been recorded, so the agent can't skip ahead. Questions, safety issues
 and interruptions are handled normally while a flow waits. A clinical emergency still ends the
 call immediately.
@@ -34,8 +38,9 @@ direct `create_ticket` tool, which is useful for comparisons in the test harness
 ## The ticket flow (`flows/log_ticket.json`)
 
 1. **Understand the problem** — the problem twice: for the ticket (`issue_summary`, detailed) and
-   as one short sentence to the caller for the read-back (`problem_spoken`, checked: no brackets,
-   semicolons, colons or "the caller"); what was tried and urgent are optional
+   as one short sentence to the caller for the read-back (`problem_spoken`: brackets, semicolons
+   and colons become commas; "the caller" or "the patient" is refused with `mentions_the_caller`);
+   what was tried and urgent are optional
 2. **Where is the screen** — hospital, plus bed number or Device ID
 3. **Who to call back** — name, Australian callback number
 4. **Read back and confirm** — system-written read-back; caller must say yes in a later turn
@@ -60,7 +65,15 @@ reply waits on a tool and a second model response:
   Other tool turns (opening a guide, starting a flow) and replies without tools get none.
 
 A holding line is part of the turn's spoken text (kept in history; an interruption keeps only what
-was heard), is never held back as narration and never counts as the turn's question.
+was heard) and is never held back as narration.
+
+**Nothing the model says before a tool call is spoken.** All text of a model round is held until
+the round ends: spoken if it was the answer, dropped if the round ended in a tool call (logged as
+"Not spoken (narration before a tool call)"); the holding lines above cover the wait. This costs
+replies without tools the time to stream the rest of the reply after its first sentence: about
+0.05 s for one sentence and 0.4 s for three (offline probe, ~80 tokens a second). If a read-back
+was in dropped text and not said afterwards, it is reset, so a "yes" can't confirm details the
+caller didn't hear.
 
 The dashboard's **Flows** page draws this from the file. `python flows.py --diagram log_ticket`
 prints a Mermaid diagram for documents.
@@ -112,14 +125,32 @@ agent just said, so an answer made only of the agent's words can vanish with no 
   echo only if it arrives during or just after the agent's speech, has at least four words and
   repeats the agent's words in order. Short answers (a hospital, a name, a bed number, "yes,
   that's right") always get through. Ignored prompts are logged as "Ignored as echo".
-- **Silence fallback.** After a reply ending in a question, if nothing arrives 9 s after its
-  estimated playback end (Twilio sends no playback-finished message; the estimate is about 2.6
-  words a second), the agent asks once more: "Sorry, I didn't catch that." and the question (the
+- **Silence fallback.** After a reply ending in a question, if nothing arrives 9 s after it has
+  finished playing, the agent asks once more: "Sorry, I didn't catch that." and the question (the
   whole read-back if that was the question). The re-ask is in history and the transcript. The
-  greeting is covered too. After that it waits as before.
+  greeting is covered too. After that it waits as before. The 9 s count from Twilio's speaker event
+  `agentSpeaking` "off"; if playback starts again ("on") the wait restarts, and the caller starting
+  to speak (`clientSpeaking` "on") cancels it. Only if no event arrives within 2 s of the estimated
+  playback end (about 2.6 words a second) is the estimate used. The transcript's `silence` event
+  says which (`timed_from`: `playback_event` or `estimate`).
 - **Every relay message is logged** in the transcript file (`relay` events; phone numbers, account
   and the call's nonce left out), and `speaker-events tokens-played` are switched on, so input
   that never becomes a turn is visible. Only caller messages count towards the per-call limit.
+
+### Server test call ref 6081 (28 Nov) and fixes
+
+- **Instructions inside tool results, again.** The agent said "The problem fields need a spoken
+  sentence and a summary, so I'll record those." The `problems` text ("this is read aloud to the
+  caller…") and `still_needed` (each field's question, with an example) were how-to wording inside
+  tool results. Results now carry field names and codes only; `tidy_spoken` fixes punctuation in
+  code; ticket results are codes too (the dry-run note became `"dry_run": true`).
+- **The narration gate let the first sentence through** ("The value sounds like a bed ID, so I'll
+  check it first.", then `lookup_device`). Narration can't be recognised by its wording, so all of
+  a round is now held (above). First word, before → after (offline probe): one-sentence reply
+  1.52 → 1.57 s, three sentences 1.50 → 1.92 s, the narration case 1.51 s (narration) → 1.63 s
+  ("Got it."), silent `flow_record` and ticket turns unchanged (1.42 s).
+- **The re-ask was about 5 s late**, timed from an estimate. It now counts from `agentSpeaking`
+  "off" (above).
 
 ### Server test call (28 Nov) and fixes
 
@@ -138,12 +169,9 @@ he's dealt with this before, so I'll record the problem now"). The code was the 
 - **The prompt didn't say where the notes come from.** It now says they come from LSPcare's own
   system, are genuine, and are never to be mentioned to the caller.
 - **Narration with thinking off.** With `thinking: between_tools`, short remarks between tool calls
-  arrive as text and were spoken. Now at most one sentence is spoken before the model's tool calls
-  are known; text after it is held until the model's round ends, spoken if the round was the answer
-  and dropped if it ended in a tool call (logged as "Not spoken (narration before a tool call)").
-  A turn that opens like narration ("Let me…", "I'll…", "I'm going to…", "One moment…") is held
-  from its first word. The first word is as quick as before (the opening ~25 characters are looked
-  at first, about 50 ms). Words said with `finish_call` (the goodbye) are kept.
+  arrive as text and were spoken. At first one sentence was still spoken before the model's tool
+  calls were known; since ref 6081 the whole round is held (above). Words said with `finish_call`
+  (the goodbye) are kept.
 - **Call reference.** The model now gets it in a system message at the start of the call.
 
 Regression scenarios: `RESUBMIT-01` (bed unknown, asks for the reference) and `RESUBMIT-02`
@@ -153,11 +181,9 @@ Regression scenarios: `RESUBMIT-01` (bed unknown, asks for the reference) and `R
 
 - Call 1 (ticket) worked end to end (ticket logged in Zoho) but repeated a question ("…which
   hospital are you at? Which hospital are you at, Sam?"). Cause: the model asked, then used a flow
-  tool, and the tool's next-step instruction made it ask again. Fix in `conversation.py`: once a
-  reply has asked a question before a tool runs, the tool result says so (as data,
-  `already_asked_caller`) and anything further the
-  model says in that reply is dropped (logged as "muted"). If a read-back was dropped that way, it
-  is reset, so a "yes" can never confirm details the caller didn't hear.
+  tool, and the tool's next-step instruction made it ask again. Fixed at the time by telling the
+  model the question was already asked (`already_asked_caller`) and muting the rest; since ref 6081
+  nothing said before a tool call is spoken, so the question is only ever asked after it.
 - Calls 2 and 3 were cut off during the greeting, and the agent used names the caller never said.
   Cause: echo. The agent's voice came back through the caller's microphone, triggered an
   interruption and was transcribed ("this is LSPcare's" → "This is Alice"). Fix: the call setup

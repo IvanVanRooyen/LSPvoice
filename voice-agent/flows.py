@@ -138,7 +138,7 @@ def clean_value(spec, raw):
     """Return (value, problem). Card-like numbers are never stored, in any field."""
     text = ' '.join(str(raw if raw is not None else '').split())
     if tickets.has_card_number(text):
-        return None, 'that looks like a card number: never record card or bank details'
+        return None, 'card_number'
     kind = spec['type']
     if kind == 'boolean':
         lowered = text.casefold()
@@ -146,16 +146,25 @@ def clean_value(spec, raw):
             return True, None
         if lowered in ('false', 'no', '0'):
             return False, None
-        return None, 'use true or false'
+        return None, 'not_yes_or_no'
     if not text:
-        return None, 'empty value'
+        return None, 'empty'
     if kind == 'au_phone':
         phone = tickets.au_phone(text)
-        return (phone, None) if phone else (None, 'not an Australian mobile or landline number; ask again')
-    if spec.get('spoken') and SPOKEN_PROBLEMS.search(text):
-        return None, ("this is read aloud to the caller: one plain spoken sentence addressed to them, with no "
-                      "brackets, semicolons, colons or 'the caller'")
+        return (phone, None) if phone else (None, 'not_au_phone')
+    if spec.get('spoken'):
+        text = tidy_spoken(text)
+        if SPOKEN_PROBLEMS.search(text):
+            return None, 'mentions_the_caller'  # can't be fixed in code: it must be said to the caller
     return text[:spec.get('max', 600)], None
+
+
+def tidy_spoken(text):
+    """Written punctuation in a read-aloud sentence becomes a spoken pause: 'black; tried the button' ->
+    'black, tried the button'; '(orange button)' -> ', orange button,'."""
+    text = re.sub(r'\s*[;:()\[\]]+\s*', ', ', text)
+    text = re.sub(r'(?:,\s*)+', ', ', text).strip(' ,')
+    return re.sub(r',\s*([.!?])', r'\1', text)
 
 
 def display(spec, value):
@@ -192,7 +201,7 @@ def readback_fields(part):
     return [name for _, name, _, _ in string.Formatter().parse(part) if name]
 
 
-SPOKEN_PROBLEMS = re.compile(r'[()\[\];:]|\bthe (caller|patient)\b|\bcaller\b', re.IGNORECASE)
+SPOKEN_PROBLEMS = re.compile(r'\b(?:the )?(?:caller|patient)\b', re.IGNORECASE)
 
 
 # ------------------------------------------------------------------ engine
@@ -267,7 +276,7 @@ class FlowEngine:
         result = {'active': True, 'flow': flow['id'], 'step': step['id'] if step else 'done',
                   'step_title': step['title'] if step else '',
                   'step_number': f'{min(index + 1, len(flow["steps"]))} of {len(flow["steps"])}',
-                  'still_needed': [flow['fields'][m]['ask'] if m in flow['fields'] else m for m in missing],
+                  'still_needed': list(missing),  # field names; how to ask is in the status note
                   'recorded': {flow['fields'][k]['label']: display(flow['fields'][k], v) for k, v in self.state['values'].items()}}
         if step and step['kind'] == 'confirm':
             result['readback'] = self.state['readback']
@@ -284,7 +293,8 @@ class FlowEngine:
         if step:
             lines.append(f"This step: {step['instruction']}")
         if s['still_needed']:
-            lines.append('Still needed: ' + '; '.join(s['still_needed']) + '.')
+            asks = [' or '.join(flow['fields'][n]['ask'] for n in need.split(' or ')) for need in s['still_needed']]
+            lines.append('Still needed: ' + '; '.join(asks) + '.')
         if s['recorded']:
             lines.append('Recorded so far: ' + '; '.join(f'{k} = {v}' for k, v in s['recorded'].items()) + '.')
         if s.get('readback'):
@@ -298,24 +308,24 @@ class FlowEngine:
 
     def start(self, flow_id):
         if flow_id not in self.flows:
-            return {'started': False, 'reason': 'unknown flow'}
+            return {'started': False, 'reason': 'unknown_flow'}
         if self.state:
             if self.state['id'] == flow_id:
-                return self.status(started=False, reason='already in this flow')
-            return {'started': False, 'reason': f'finish or cancel the {self.state["id"]} flow first'}
+                return self.status(started=False, reason='already_in_this_flow')
+            return {'started': False, 'reason': 'other_flow_active', 'active_flow': self.state['id']}
         self.session['flow'] = {'id': flow_id, 'values': {}, 'confirmed': False, 'readback': None,
                                 'readback_turn': None, 'result': None}
         return self.status(started=True)
 
     def record(self, items):
         if not self.state:
-            return {'recorded': False, 'reason': 'no flow is active'}
+            return {'recorded': False, 'reason': 'no_active_flow'}
         fields = self._definition()['fields']
         accepted, problems = {}, {}
         for item in items:
             name, raw = item.get('field'), item.get('value')
             if name not in fields:
-                problems[str(name)] = 'not a field of this flow'
+                problems[str(name)] = 'not_a_field'
                 continue
             value, problem = clean_value(fields[name], raw)
             if problem:
@@ -331,16 +341,16 @@ class FlowEngine:
 
     async def confirm(self, answer):
         if not self.state:
-            return {'confirmed': False, 'reason': 'no flow is active'}
+            return {'confirmed': False, 'reason': 'no_active_flow'}
         index, step, missing = self._step()
         if not step or step['kind'] != 'confirm':
-            return self.status(confirmed=False, reason='not at the read-back step yet: details are still needed')
+            return self.status(confirmed=False, reason='not_at_readback')
         self.status()  # makes sure a read-back exists
         if self._turn() <= self.state['readback_turn']:
-            return self.status(confirmed=False, reason='the caller has not answered the read-back yet: wait for the caller')
+            return self.status(confirmed=False, reason='readback_not_answered')
         if answer != 'yes':
             self.state['readback'] = None
-            return self.status(confirmed=False, reason='a detail needs changing: once the corrected value is recorded, a new read-back follows')
+            return self.status(confirmed=False, reason='correction_needed')
         self.state['confirmed'] = True
         flow = self._definition()
         outcome = {'confirmed': True}
@@ -360,7 +370,7 @@ class FlowEngine:
 
     def cancel(self, reason):
         if not self.state:
-            return {'cancelled': False, 'reason': 'no flow is active'}
+            return {'cancelled': False, 'reason': 'no_active_flow'}
         self.session.setdefault('flows_done', []).append({'id': self.state['id'], 'ok': False, 'cancelled': str(reason)[:200]})
         self.session['flow'] = None
         return {'cancelled': True}

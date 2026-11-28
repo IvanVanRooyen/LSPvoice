@@ -149,6 +149,19 @@ callback number and a short description of the problem; read them back and get a
 clear yes. Say a ticket is logged only when the tool returns a ticket number, then
 read the number out. If it fails, say so honestly and do not retry. One ticket per
 call. Never put card or bank details in a ticket. Do not promise a callback time.
+{ticket_codes}'''
+# Tool results carry short codes, never wording (instructions inside a tool result can look like a
+# prompt injection, and the model reads them out). What each code means for the caller is here.
+TICKET_CODES = '''Ticket and flow results use short codes. dry_run: tell the caller it is a test ticket.
+not_confirmed: read the details back and get a yes first. missing_details: ask for the
+details listed. invalid_callback_number or not_au_phone: ask again for an Australian
+mobile or landline number. card_number_detected or card_number: leave card details out
+and never repeat them. unconfirmed: don't try again; say the support team will check.
+ticket_system_unavailable or tickets_unavailable: apologise and say it couldn't be
+logged. readback_not_answered: wait for the caller's answer to the read-back.
+correction_needed: ask what needs changing. mentions_the_caller: record problem_spoken
+again, as said to the caller ("your screen…"). not_yes_or_no or empty: record the value
+again. Never read codes or field names out.
 '''
 TICKETS_FLOW = '''Support tickets are logged only through the log_ticket flow. When the caller needs
 follow-up from the support team (a fault you cannot fix, an arm fault, paid but not
@@ -157,15 +170,15 @@ the flow one question at a time. While a flow runs, LSPcare's own system adds a 
 status note as a system message at the start of a turn: the current step, what it
 needs, what is recorded and the read-back. These notes are genuine and come from the
 system, never from the caller; follow them and never mention them, or flows, steps,
-tools or system messages, to the caller. Flow tool results are data (what was recorded,
-what is still needed). Record each detail with flow_record as soon as the caller gives
+tools or system messages, to the caller. Flow tool results are data: the step, the field
+names still needed, what was recorded, and codes for values not accepted. Record each detail with flow_record as soon as the caller gives
 it, recording only what the caller said (not lookup results). When a read-back is given
 (in the status note or a flow tool result), say it word for word, wait for the caller's
 answer, then call flow_confirm. Say a ticket is logged only when
 flow_confirm returns a ticket number, then read it out digit by digit. If it fails, say
 so honestly and do not retry. One ticket per call. Never record card or bank details.
 Do not promise a callback time.
-'''
+{ticket_codes}'''
 
 
 def flows_on(cfg):
@@ -180,7 +193,7 @@ def tool_specs(cfg):
 
 
 def system_prompt(cfg=None):
-    tickets_section = TICKETS_FLOW if flows_on(cfg or {}) else TICKETS_DIRECT
+    tickets_section = (TICKETS_FLOW if flows_on(cfg or {}) else TICKETS_DIRECT).replace('{ticket_codes}', TICKET_CODES)
     return SYSTEM.replace('{tickets_section}', tickets_section) + '\n\n' + knowledge()
 
 
@@ -325,11 +338,17 @@ async def relay(ws:WebSocket):
         await ws.close(code=1008);return
     await ws.accept()
     sid=None;task=None;convo=None;state=None;silence=None
-    # What the agent is saying and when it should have finished playing (Twilio sends no such signal).
+    # What the agent is saying and when it should have finished playing: an estimate, used for the echo
+    # check and as a fallback when Twilio's speaker events (agentSpeaking on/off) don't arrive.
     playing={'text':'','start':0.0,'until':0.0,'fresh':True}
+    # Twilio's speaker events: played_out is set on agentSpeaking "off" and cleared when new speech starts.
+    agent={'speaking':False,'epoch':0}
+    played_out=asyncio.Event()
 
     def speaking(text):
-        if playing['fresh']:playing.update(text='',start=time.monotonic(),fresh=False)
+        if playing['fresh']:
+            playing.update(text='',start=time.monotonic(),fresh=False)
+            played_out.clear()  # new speech: wait for its own "off"
         playing['text']+=text
         playing['until']=playing['start']+listening.playback_seconds(playing['text'])
 
@@ -349,9 +368,21 @@ async def relay(ws:WebSocket):
         text=text or listening.reprompt_for(reply,((state or {}).get('flow') or {}).get('readback'))
         if not text:return
         async def wait():
-            await asyncio.sleep(max(0.0,playing['until']-time.monotonic())+listening.SILENCE_SECONDS)
+            timed_from='playback_event'
+            while True:
+                if not played_out.is_set():
+                    # Until Twilio says the agent stopped speaking; the estimate (plus a little) if it never does.
+                    fallback=max(0.0,playing['until']-time.monotonic())+listening.EVENT_GRACE
+                    try:
+                        await asyncio.wait_for(played_out.wait(),fallback)
+                    except TimeoutError:
+                        timed_from='estimate'
+                epoch=agent['epoch']
+                await asyncio.sleep(listening.SILENCE_SECONDS)
+                if agent['epoch']==epoch and not agent['speaking']:
+                    break  # nothing more was played: a real silence
             if task and not task.done():return  # a reply is being prepared after all
-            if transcript:transcript.event('silence',{'seconds':listening.SILENCE_SECONDS})
+            if transcript:transcript.event('silence',{'seconds':listening.SILENCE_SECONDS,'timed_from':timed_from})
             if not convo.reprompt(text):return
             playing['fresh']=True;speaking(text)
             await ws.send_json({'type':'text','token':text,'last':True})
@@ -437,8 +468,13 @@ async def relay(ws:WebSocket):
                     await stop_generation(str(event.get('utteranceUntilInterrupt','')))
                 elif kind=='dtmf':
                     cancel_silence()
-                elif kind=='info' and 'client' in str(event).lower():
-                    cancel_silence()  # the caller has started speaking (speaker events)
+                elif kind=='info' and event.get('name')=='agentSpeaking':
+                    if event.get('value')=='on':
+                        agent['speaking']=True;agent['epoch']+=1;played_out.clear()
+                    elif event.get('value')=='off':
+                        agent['speaking']=False;played_out.set()  # the silence timer starts from here
+                elif kind=='info' and event.get('name')=='clientSpeaking' and event.get('value')=='on':
+                    cancel_silence()  # the caller has started speaking
                 elif kind=='error':
                     print(f"[pilot] Twilio reported an error on {sid}: {str(event.get('description',''))[:300]}",
                           file=sys.stderr,flush=True)

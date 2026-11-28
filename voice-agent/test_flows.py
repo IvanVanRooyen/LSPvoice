@@ -84,8 +84,13 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(self.session['flow']['values']['issue_summary'],  # the ticket text keeps its detail
                          'Arm on the LSPC15mf (15.6-inch) keeps dropping; caller wants a repair')
         self.assertIn("I've marked it as urgent.", self.record(urgent='yes')['readback'])
-        for ticket_style in ('the caller needs a repair', 'black screen (orange button)', 'screen black; tried button'):
-            self.assertIn('read aloud', self.record(problem_spoken=ticket_style)['problems']['problem_spoken'])
+        self.assertEqual(self.record(problem_spoken='the caller needs a repair')['problems'], {'problem_spoken': 'mentions_the_caller'})
+        for written, said in [('black screen (orange button)', 'black screen, orange button'),
+                              ('screen black; tried button', 'screen black, tried button'),
+                              ('it shows: no signal.', 'it shows, no signal.')]:  # punctuation fixed in code, not bounced back
+            self.assertEqual(self.record(problem_spoken=written)['problems'], {})
+            self.assertEqual(self.session['flow']['values']['problem_spoken'], said)
+        self.assertEqual(flows.tidy_spoken('a [b] ; c'), 'a, b, c')
 
     def test_read_back_template_checked(self):
         for broken, message in [(['Hi {nobody}.'], 'unknown field'), (['{caller_name'], 'not valid'), ('text', 'list'),
@@ -109,22 +114,58 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(flows.spoken_value({'type': 'au_phone'}, '+61489273624'), '0 4 8 9, 2 7 3, 6 2 4')
         self.assertEqual(flows.spoken_value({'type': 'au_phone'}, '+61298765432'), '0 2, 9 8 7 6, 5 4 3 2')
 
+    def test_results_are_data_only(self):
+        # Test call ref 6081: "The problem fields need a spoken sentence and a summary, so I'll record
+        # those." came from how-to wording in a tool result. Results hold codes and field names only.
+        asks = [f['ask'] for f in TICKET_FLOW['fields'].values()]
+        results = [self.engine.start('log_ticket'), self.engine.start('log_ticket'), self.engine.start('nope'),
+                   self.record(issue_summary='x'), self.record(problem_spoken='the caller needs a repair'),
+                   self.record(callback_number='+44 20 7946 0000', urgent='maybe', voucher='x', issue_summary='4111 1111 1111 1111'),
+                   self.engine.status(), run(self.engine.confirm('yes'))]
+        self.fill(); results += [run(self.engine.confirm('yes'))]
+        def strings(value):
+            if isinstance(value, dict):
+                return [s for k, v in value.items() if k != 'readback' for s in strings(k) + strings(v)]  # the read-back is the line to say
+            if isinstance(value, list):
+                return [s for v in value for s in strings(v)]
+            return [value] if isinstance(value, str) else []
+        said = ' '.join(s for r in results for s in strings(r))
+        for ask in asks:
+            self.assertNotIn(ask, said)
+        for word in (' ask', 'say ', ' should', 'tell ', 'read aloud', 'please', 'e.g', 'for example', 'instead'):
+            self.assertNotIn(word, said.lower(), word)
+        self.assertEqual(results[0]['still_needed'], ['issue_summary', 'problem_spoken'])  # field names, not questions
+        fresh = flows.FlowEngine({'caller_turns': 1}, {'log_ticket': TICKET_FLOW}, {}); fresh.start('log_ticket')
+        self.assertIn(TICKET_FLOW['fields']['problem_spoken']['ask'], fresh.note())  # the asks live in the note
+
+    def test_ticket_results_are_codes(self):
+        args = {'caller_confirmed': True, 'hospital': 'Royal Adelaide', 'bed_id': '7G13101', 'device_id': '', 'caller_name': 'Sam',
+                'callback_number': '0400 123 456', 'issue_summary': 'Arm keeps dropping'}
+        cases = [({}, {'tickets': 'off'}), ({**args, 'caller_confirmed': False}, {}), ({**args, 'callback_number': '12'}, {}),
+                 ({**args, 'issue_summary': 'card 4111 1111 1111 1111'}, {}), ({**args, 'hospital': ''}, {})]
+        reasons = [run(tickets.create({}, a, c, None, lambda *_: None, 'CA-t'))['reason'] for a, c in cases]
+        self.assertEqual(reasons, ['tickets_unavailable', 'not_confirmed', 'invalid_callback_number', 'card_number_detected',
+                                   'missing_details: hospital'])
+        with tempfile.TemporaryDirectory() as folder, patch.object(tickets, 'DRY_RUN_LOG', Path(folder) / 'd.jsonl'):
+            logged = run(tickets.create({}, args, {'tickets': 'dry_run'}, None, lambda *_: None, 'CA-t'))
+        self.assertEqual(set(logged), {'ticket_logged', 'ticket_number', 'dry_run'})  # no note to pass on
+
     def test_values_are_checked(self):
         self.engine.start('log_ticket')
         result = self.record(callback_number='+44 20 7946 0000', issue_summary='card 4111 1111 1111 1111', urgent='maybe')
         self.assertEqual(set(result['problems']), {'callback_number', 'issue_summary', 'urgent'})
         self.assertEqual(self.session['flow']['values'], {})
-        self.assertIn('not a field', self.engine.record([{'field': 'voucher_code', 'value': 'x'}])['problems']['voucher_code'])
+        self.assertEqual('not_a_field', self.engine.record([{'field': 'voucher_code', 'value': 'x'}])['problems']['voucher_code'])
         self.assertTrue(self.record(urgent='yes')['recorded'])
         self.assertIs(self.session['flow']['values']['urgent'], True)
 
     def test_yes_only_counts_after_the_read_back_in_a_later_turn(self):
         self.engine.start('log_ticket')
         too_early = run(self.engine.confirm('yes'))
-        self.assertFalse(too_early['confirmed']); self.assertIn('not at the read-back step', too_early['reason'])
+        self.assertFalse(too_early['confirmed']); self.assertEqual(too_early['reason'], 'not_at_readback')
         self.fill()
         same_turn = run(self.engine.confirm('yes'))
-        self.assertFalse(same_turn['confirmed']); self.assertIn('wait for the caller', same_turn['reason'])
+        self.assertFalse(same_turn['confirmed']); self.assertEqual(same_turn['reason'], 'readback_not_answered')
         self.assertEqual(self.actions_run, [])
         self.session['caller_turns'] += 1
         done = run(self.engine.confirm('yes'))
@@ -220,9 +261,10 @@ class CallBehaviourTests(unittest.TestCase):
             self.assertEqual(relay.get('interruptSensitivity'), 'low')
         app.sessions.clear()
 
-    def test_question_before_a_tool_is_not_asked_again(self):
+    def test_question_before_a_tool_is_asked_once(self):
+        # Text before a tool call is held and dropped, so the question is only asked after the tool.
         fake = FakeClient([FakeStream('Which hospital are you at?', content=[tool_use('start_flow', {'flow_id': 'log_ticket'})]),
-                           FakeStream('Which hospital are you at, Jo?')])  # the model asks again anyway
+                           FakeStream('Which hospital are you at, Jo?')])
         session = {}
         events = []
         heard = []
@@ -231,12 +273,12 @@ class CallBehaviourTests(unittest.TestCase):
             convo = app.build_conversation({**CLAUDE_CFG, 'tickets': 'dry_run'}, 'CA-q', session, on_text,
                                            lambda k, d: events.append((k, d)))
             kind, spoken = run(convo.respond('The arm on my screen keeps dropping, please log a ticket.'))
-        self.assertEqual(spoken, 'Which hospital are you at?')
-        self.assertEqual(''.join(heard), 'Which hospital are you at?')  # the caller hears it once
-        self.assertIn(('suppressed', {'text': 'Which hospital are you at, Jo?', 'reason': 'question already asked'}), events)
-        self.assertEqual(convo.history[-1]['content'], 'Which hospital are you at?')
+        self.assertEqual(spoken, 'Which hospital are you at, Jo?')
+        self.assertEqual(''.join(heard), spoken)  # the caller hears it once
+        self.assertIn(('suppressed', {'text': 'Which hospital are you at?', 'reason': 'narration before a tool call'}), events)
+        self.assertEqual(convo.history[-1]['content'], spoken)
         result = json.loads(fake.requests[1]['messages'][-1]['content'][0]['content'])
-        self.assertEqual(result['already_asked_caller'], 'Which hospital are you at?')
+        self.assertNotIn('already_asked_caller', result)
         self.assertNotIn('say_next', result)  # data only: no instruction inside a tool result
 
     def test_narration_before_a_tool_is_not_spoken(self):
@@ -253,10 +295,10 @@ class CallBehaviourTests(unittest.TestCase):
             convo = app.build_conversation({**CLAUDE_CFG, 'tickets': 'dry_run'}, 'CA-n', {}, on_text,
                                            lambda k, d: events.append((k, d)))
             kind, spoken = run(convo.respond('I just want to resubmit a ticket for repair.'))
-        self.assertEqual(''.join(heard), 'I can log a ticket for you. Understood, Sam. Which hospital are you at?')
+        self.assertEqual(''.join(heard), 'Understood, Sam. Which hospital are you at?')
         self.assertEqual(spoken, ''.join(heard))
         dropped = [d['text'] for k, d in events if k == 'suppressed' and d['reason'] == 'narration before a tool call']
-        self.assertEqual(dropped, ["Since a black screen was the issue, I'll identify the terminal.",
+        self.assertEqual(dropped, ["I can log a ticket for you. Since a black screen was the issue, I'll identify the terminal.",
                                    "Sam says he's dealt with this before, so I'll record the problem now."])
 
     def test_narration_as_the_opening_sentence_is_held(self):
@@ -289,15 +331,20 @@ class CallBehaviourTests(unittest.TestCase):
         self.assertEqual(''.join(heard), 'Thanks for calling. Have a good day.')
 
     def test_unheard_read_back_cannot_be_confirmed(self):
-        session = {'caller_turns': 3, 'flow': {'id': 'log_ticket', 'values': {}, 'confirmed': False,
-                                               'readback': 'Just to confirm…', 'readback_turn': 4, 'result': None}}
-        fake = FakeClient([FakeStream('Is that your mobile?', content=[tool_use('lookup_device', {'hospital': 'RAH', 'bed_id': '1', 'device_id': ''})]),
-                           FakeStream('Just to confirm, Sam, Royal Adelaide…')])
-        async def on_text(_): pass
-        with patch.object(claude_reply.anthropic, 'AsyncAnthropic', return_value=fake), patch('sys.stderr', io.StringIO()),                 patch.object(app, 'lookup', return_value={'device_found': True}):
-            convo = app.build_conversation({**CLAUDE_CFG, 'tickets': 'dry_run'}, 'CA-s', session, on_text)
-            run(convo.respond('0400 123 456'))
-        self.assertIsNone(session['flow']['readback'])  # muted read-back is discarded, so a yes can't confirm it
+        readback = "Just to confirm: you're Sam at Royal Adelaide, bed 7 G 1. Is that right?"
+        lookup = tool_use('lookup_device', {'hospital': 'RAH', 'bed_id': '1', 'device_id': ''})
+        def after(*streams):
+            session = {'caller_turns': 3, 'flow': {'id': 'log_ticket', 'values': {}, 'confirmed': False,
+                                                   'readback': readback, 'readback_turn': 4, 'result': None}}
+            async def on_text(_): pass
+            with patch.object(claude_reply.anthropic, 'AsyncAnthropic', return_value=FakeClient(list(streams))), \
+                    patch('sys.stderr', io.StringIO()), patch.object(app, 'lookup', return_value={'device_found': True}):
+                run(app.build_conversation({**CLAUDE_CFG, 'tickets': 'dry_run'}, 'CA-s', session, on_text).respond('0400 123 456'))
+            return session['flow']['readback']
+        # Said before a tool call, so dropped with that round: discarded, so a yes can't confirm it.
+        self.assertIsNone(after(FakeStream(readback, content=[lookup]), FakeStream('Is that your mobile?')))
+        # Said as the answer: kept.
+        self.assertEqual(after(FakeStream(content=[lookup]), FakeStream('Thanks. ' + readback)), readback)
 
     def test_no_guard_when_no_question_was_asked(self):
         fake = FakeClient([FakeStream('Please leave the arm as it is.', content=[tool_use('start_flow', {'flow_id': 'log_ticket'})]),
@@ -306,7 +353,7 @@ class CallBehaviourTests(unittest.TestCase):
         with patch.object(claude_reply.anthropic, 'AsyncAnthropic', return_value=fake), patch('sys.stderr', io.StringIO()):
             convo = app.build_conversation({**CLAUDE_CFG, 'tickets': 'dry_run'}, 'CA-r', {}, on_text)
             kind, spoken = run(convo.respond('The arm keeps dropping.'))
-        self.assertEqual(spoken, 'Please leave the arm as it is. Which hospital are you at?')
+        self.assertEqual(spoken, 'Which hospital are you at?')  # the remark before the tool is dropped
         self.assertNotIn('already_asked_caller', json.loads(fake.requests[1]['messages'][-1]['content'][0]['content']))
 
 
@@ -356,16 +403,16 @@ class HoldingLineTests(unittest.TestCase):
         turns, events, convo, fake = self.call(
             [FakeStream(content=[record(1)]), FakeStream("What's your bed number?"),            # silent record: ack
              FakeStream(content=[record(2)]), FakeStream("And your name?"),                     # again: a different ack
-             FakeStream('Thanks, Sam.', content=[record(3)]), FakeStream('And your number?'),   # model spoke first: none
+             FakeStream('Thanks, Sam.', content=[record(3)]), FakeStream('And your number?'),   # words before a tool: dropped
              FakeStream(content=[guide]), FakeStream('Press the orange button once.')],        # opening a guide: none
             ['Royal Adelaide.', 'Bed 7G13101.', "It's Sam.", 'It has an orange button.'],
             session={'caller_turns': 0, 'flow': {'id': 'log_ticket', 'values': {}, 'confirmed': False, 'readback': None,
                                                  'readback_turn': None, 'result': None}})
         self.assertEqual(turns, ["Got it. What's your bed number?", 'Thanks. And your name?',
-                                 'Thanks, Sam. And your number?', 'Press the orange button once.'])
+                                 'Okay. And your number?', 'Press the orange button once.'])
         first_result = json.loads(fake.requests[1]['messages'][-1]['content'][0]['content'])
-        self.assertNotIn('already_asked_caller', first_result)  # a holding line is never the turn's question
-        self.assertFalse([d for k, d in events if k == 'suppressed'])
+        self.assertNotIn('already_asked_caller', first_result)
+        self.assertEqual([d['text'] for k, d in events if k == 'suppressed'], ['Thanks, Sam.'])
         convo.interrupted('Got it.')  # the caller spoke over the rest: only what was heard is kept
         self.assertEqual(convo.history[-1]['content'], 'Got it.')
 
@@ -381,13 +428,15 @@ class HoldingLineTests(unittest.TestCase):
             ['Royal Adelaide.', 'Bed 7G13101.', "It's Sam."], session=flow)
         self.assertEqual(turns, ["Got it. What's your bed number?", 'Thanks. Thanks, Sam. And your number?', 'Okay.'])
 
-    def test_question_before_a_tool_still_detected(self):
-        record = tool_use('flow_record', {'values': [{'field': 'hospital', 'value': 'Royal Adelaide'}]})
-        turns, events, _, fake = self.call([FakeStream('Which bed are you in?', content=[record]), FakeStream('Which bed?')],
-                                           ['Royal Adelaide.'])
-        self.assertEqual(turns, ['Which bed are you in?'])
-        result = json.loads(fake.requests[1]['messages'][-1]['content'][0]['content'])
-        self.assertEqual(result['already_asked_caller'], 'Which bed are you in?')
+    def test_whole_round_held_until_it_ends(self):
+        # Test call ref 6081: the first sentence of a round that ended in a tool call was spoken.
+        lookup = tool_use('lookup_device', {'hospital': 'Royal Adelaide', 'bed_id': '7G13101', 'device_id': ''})
+        turns, events, _, _ = self.call([FakeStream("The value sounds like a bed ID, so I'll check it first. ", content=[lookup]),
+                                         FakeStream("That's the LSPC15mf in bed 7G13101. What's happening with it?")],
+                                        ['7G13101.'])
+        self.assertEqual(turns, ["Got it. That's the LSPC15mf in bed 7G13101. What's happening with it?"])
+        self.assertEqual([d['text'] for k, d in events if k == 'suppressed'],
+                         ["The value sounds like a bed ID, so I'll check it first."])
 
 
 class TicketFlowConversationTests(unittest.TestCase):
@@ -424,7 +473,7 @@ class TicketFlowConversationTests(unittest.TestCase):
             run(call())
         tool_results = [d['result'] for k, d in events if k == 'tool']
         early, final = tool_results[4], tool_results[5]
-        self.assertFalse(early['confirmed']); self.assertIn('wait for the caller', early['reason'])
+        self.assertFalse(early['confirmed']); self.assertEqual(early['reason'], 'readback_not_answered')
         self.assertTrue(final['confirmed']); self.assertTrue(final['result']['ticket_logged'])
         self.assertEqual(final['result']['args']['callback_number'], '+61400123456')
         self.assertEqual(session['ticket']['status'], 'logged'); self.assertIsNone(session['flow'])

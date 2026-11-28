@@ -63,16 +63,16 @@ def has_card_number(text):
 
 def problems(args):
     if args.get('caller_confirmed') is not True:
-        return 'not_confirmed: read the details back and get a clear yes first'
+        return 'not_confirmed'
     if any(has_card_number(args.get(k)) for k in FREE_TEXT + ('callback_number',)):
-        return 'card_number_detected: never record card or bank details; leave them out'
+        return 'card_number_detected'
     missing = [k for k in ('hospital', 'caller_name', 'callback_number', 'issue_summary') if not str(args.get(k, '')).strip()]
     if not (str(args.get('bed_id', '')).strip() or str(args.get('device_id', '')).strip()):
         missing.append('bed_id or device_id')
     if missing:
         return 'missing_details: ' + ', '.join(missing)
     if au_phone(args['callback_number']) is None:
-        return 'invalid_callback_number: ask for an Australian mobile or landline number'
+        return 'invalid_callback_number'
     return None
 
 
@@ -123,7 +123,7 @@ async def create(state, args, cfg, desk, lookup, call_sid, on_sending=None):
     or the dry-run log): the moment the caller can be told "one moment while I log that"."""
     mode = cfg.get('tickets', 'dry_run')
     if mode not in MODES or mode == 'off':
-        return {'ticket_logged': False, 'reason': 'tickets_unavailable: say a ticket cannot be logged on this line'}
+        return {'ticket_logged': False, 'reason': 'tickets_unavailable'}
     lock = state.setdefault('ticket_lock', asyncio.Lock())
     async with lock:
         previous = state.get('ticket')
@@ -131,8 +131,7 @@ async def create(state, args, cfg, desk, lookup, call_sid, on_sending=None):
             return {'ticket_logged': True, 'already_logged': True, 'ticket_number': previous['ticket_number'],
                     **({'dry_run': True} if previous.get('dry_run') else {})}
         if previous and previous['status'] == 'unconfirmed':
-            return {'ticket_logged': False, 'reason': ('unconfirmed: an earlier attempt may have created a ticket; '
-                    'do not try again; tell the caller the support team will check')}
+            return {'ticket_logged': False, 'reason': 'unconfirmed'}
         problem = problems(args)
         if problem:
             return {'ticket_logged': False, 'reason': problem}
@@ -146,17 +145,15 @@ async def create(state, args, cfg, desk, lookup, call_sid, on_sending=None):
             await asyncio.to_thread(_write_dry_run, {'at': datetime.now(timezone.utc).isoformat(),
                                                      'call': call_sid, 'ticket_number': number, 'body': body})
             state['ticket'] = {'status': 'logged', 'ticket_number': number, 'dry_run': True}
-            return {'ticket_logged': True, 'ticket_number': number, 'dry_run': True,
-                    'note': 'Pilot dry run: recorded locally, not sent to Zoho. Tell the caller it is a test ticket.'}
+            return {'ticket_logged': True, 'ticket_number': number, 'dry_run': True}
         try:
             created = await asyncio.to_thread(desk.create_ticket, body)
         except ZohoError as error:
             print(f'[pilot] ticket failed on {call_sid}: {error}', file=sys.stderr, flush=True)
             if error.sent:
                 state['ticket'] = {'status': 'unconfirmed'}
-                return {'ticket_logged': False, 'reason': ('unconfirmed: the ticket system did not confirm; '
-                        'do not try again; tell the caller the support team will check')}
-            return {'ticket_logged': False, 'reason': 'ticket_system_unavailable: apologise; do not claim it was logged'}
+                return {'ticket_logged': False, 'reason': 'unconfirmed'}
+            return {'ticket_logged': False, 'reason': 'ticket_system_unavailable'}
         state['ticket'] = {'status': 'logged', 'ticket_number': created['ticket_number']}
         print(f"[pilot] ticket #{created['ticket_number']} logged on {call_sid}", file=sys.stderr, flush=True)
         return {'ticket_logged': True, 'ticket_number': created['ticket_number']}

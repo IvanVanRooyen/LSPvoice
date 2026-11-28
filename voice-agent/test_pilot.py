@@ -140,12 +140,13 @@ class PilotTests(unittest.TestCase):
             with self.ws() as ws:
                 self.setup(ws,nonce)
                 ws.send_json({'type':'prompt','last':True,'voicePrompt':'Hello.'})
-                ws.receive_json()
-                ws.send_json({'type':'interrupt','utteranceUntilInterrupt':'Hello'})
+                # the round has not ended, so none of its text has been sent to the caller
+                ws.send_json({'type':'interrupt','utteranceUntilInterrupt':''})
                 ws.send_json({'type':'prompt','last':True,'voicePrompt':'Wait, another question.'})
-                ws.receive_json();self.assertTrue(ws.receive_json()['last'])
-        previous=[x for x in fake.requests[1]['input'] if x.get('role')=='assistant']
-        self.assertEqual(previous,[{'role':'assistant','content':'Hello'}])
+                said=[ws.receive_json()]
+                while not said[-1]['last']:said.append(ws.receive_json())
+        self.assertNotIn('not heard',''.join(m['token'] for m in said))
+        self.assertEqual([x for x in fake.requests[1]['input'] if x.get('role')=='assistant'],[])
 
     def test_setup_stores_secrets_privately_without_printing(self):
         with tempfile.TemporaryDirectory() as folder:

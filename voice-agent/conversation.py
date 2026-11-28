@@ -14,6 +14,7 @@ import time
 from openai import AsyncOpenAI
 
 import claude_reply
+import listening
 import tools
 
 _MARKER = re.compile(r'[ \t]*(?:[-•]|\d{1,2}[.)])[ \t]')        # a list marker at the start of a line
@@ -58,14 +59,6 @@ class SpokenText:
         return rest
 
 
-_SENTENCE_END = '.!?'
-# A turn that opens like this is the model describing its next step, not answering: hold it like
-# later text (dropped if a tool call follows, spoken if not).
-_NARRATION_START = re.compile(
-    r"(?:(?:ok(?:ay)?|sure|alright|right|great|thanks|thank you)[,.!]?\s+)?"
-    r"(?:let me|let's|i'll|i will|i'm going to|i am going to|i'm just|i'm now|now i'll|one moment|just a moment|"
-    r"give me a moment|bear with me)\b", re.IGNORECASE)
-_DECIDE_AFTER = 25  # characters of the opening looked at before the first word is spoken (~50 ms)
 # Holding acknowledgements (fixed wording, spoken by code): only when the model's first response in a
 # turn is a silent call to a tool that records or looks up what the caller just said. Other tool turns
 # (opening a guide, starting a flow) and answers without tools get none: a filler there is just padding.
@@ -75,6 +68,13 @@ ACK_TOOLS = {'flow_record', 'lookup_device'}
 # number?") would be heard as "Thanks. Thanks. …": that opening sentence is left out.
 _BARE_ACK = re.compile(r"\s*(?:thanks|thank you|got it|okay|ok|great|alright|all right|sure)\s*[.!]\s*", re.IGNORECASE)
 FLOW_ENDED_NOTE = "Flow status from LSPcare's own system: the flow has ended; earlier flow status notes no longer apply."
+
+
+def _has_read_back(readback, text, run=5):
+    """True when text contains part of the read-back: some run of its words in order."""
+    said, back = listening.words(text), listening.words(readback)
+    runs = {tuple(back[i:i + run]) for i in range(max(1, len(back) - run + 1))}
+    return any(tuple(said[i:i + run]) in runs for i in range(max(1, len(said) - run + 1)))
 
 
 class Conversation:
@@ -123,70 +123,32 @@ class Conversation:
             note = self._last_note
         return ('\n\n'.join(parts) or None), note
 
-    # Spoken text passes a gate: the first sentence of a turn is spoken as it streams; after it,
-    # text is held until the model's round ends. If the round ends in a tool call the held text was
-    # narration ("I'll record that now") and is dropped; otherwise it is the answer and is spoken.
-    # This keeps the first word as quick as before while narration between tool calls is never heard.
-    def _gate(self, text):
-        if self._holding:
-            self._held += text
-            return ''
-        if self._deciding:  # the turn's opening words decide whether its first sentence may stream
-            self._opening += text
-            if len(self._opening) < _DECIDE_AFTER and not any(c in _SENTENCE_END for c in self._opening):
-                return ''
-            if self._acked and _BARE_ACK.fullmatch(self._opening):
-                return ''  # "Thanks." so far: see whether more follows before deciding
-            if self._acked and _BARE_ACK.match(self._opening) and not self._opening[_BARE_ACK.match(self._opening).end():].strip(' '):
-                return ''
-            text = self._decide()
-            if self._holding:
-                return ''
-        out = []
-        for i, ch in enumerate(text):
-            if ch.isspace() and self._last_char in _SENTENCE_END:
-                self._holding = True
-                self._held += text[i:]
-                break
-            out.append(ch)
-            self._last_char = ch
-        return ''.join(out)
-
-    def _decide(self):
-        """Called once per turn with the opening words: narration is held, anything else streams."""
-        text, self._opening, self._deciding = self._opening, '', False
-        if self._acked:  # the caller has already heard an acknowledgement this turn
-            bare = _BARE_ACK.match(text)
-            if bare:
-                text = text[bare.end():]
-        if _NARRATION_START.match(text.lstrip()):
-            self._holding = True
-            self._held += text
-            return ''
-        return text
-
+    # Spoken text is held until the model's round ends. If the round ends in a tool call the text was
+    # the model describing its own work ("The value sounds like a bed ID, so I'll check it first") and
+    # is dropped; otherwise it is the answer and is spoken. Narration can't be recognised by its
+    # wording, so nothing from a round is spoken before its outcome is known. Tool turns get a holding
+    # line instead; replies without tools wait for the whole round (about 0.2-0.4 s on the server).
     async def _speak(self, delta):
-        await self._say(self._gate(self._spoken.feed(delta)))
+        self._held += self._spoken.feed(delta)
 
     async def _round_end(self, tool_names):
         """After each model response, before its tools run. tool_names: the tools it called."""
-        tool_used = any(n != 'finish_call' for n in tool_names)
-        tail = self._spoken.flush()
-        if tail:
-            await self._say(self._gate(tail))
-        if self._deciding and self._opening:  # a short round: decide on what there is
-            opening = self._decide()
-            if opening:
-                await self._say(self._gate(opening))
-        held, self._held = self._held, ''
+        tool_used = any(n != 'finish_call' for n in tool_names)  # words said with finish_call are the goodbye
+        held, self._held = self._held + self._spoken.flush(), ''
         if tool_used:
             if held.strip():
                 self._emit('suppressed', text=held.strip(), reason='narration before a tool call')
-        elif held:
-            await self._say(held)
+                self._dropped += ' ' + held
+        elif held.strip():
+            if self._acked:  # the caller has already heard an acknowledgement this turn
+                bare = _BARE_ACK.match(held)
+                if bare:
+                    held = held[bare.end():]
+            if held.strip():
+                await self._say(held)
         if tool_used and self._rounds == 0 and not self.partial and set(tool_names) <= ACK_TOOLS:
-            # The caller has just given a detail and the model called a tool without a word: the answer
-            # needs a second model response (~1.5 s), so acknowledge now rather than leave a silence.
+            # The caller has just given a detail and the model called a tool: the answer needs a
+            # second model response (~1.5 s), so acknowledge now rather than leave a silence.
             await self.hold(self._next_ack())
             self._acked = True
         self._rounds += 1
@@ -201,7 +163,7 @@ class Conversation:
         """Speak a fixed holding line (code, not the model) while the reply waits on something slow.
 
         Part of the turn's spoken text (so it is in history and interruptions keep only what was
-        heard), never held back, dropped or muted, and not the turn's question."""
+        heard), and never held back or dropped."""
         if self.partial and not self.partial[-1].isspace():
             text = ' ' + text
         await self._out(text)
@@ -210,13 +172,8 @@ class Conversation:
     async def _say(self, delta):
         if not delta:
             return
-        if self._question_pending:
-            # A question was asked before a tool ran: the caller hears it once, then we wait.
-            self._suppressed += delta
-            return
         if self._after_tool and self.partial and not self.partial[-1].isspace() and not delta[0].isspace():
             delta = ' ' + delta  # text spoken before and after a tool call: keep a word gap
-        self._model_said += delta
         await self._out(delta)
 
     async def _out(self, delta):
@@ -230,14 +187,6 @@ class Conversation:
         self._after_tool = True
         self._timing['tools'].append(name + (':' + args['guide_id'] if name == 'get_guide' else ''))
         result = await self.run_tool(name, args)
-        spoken = self._model_said.rstrip()  # the model's own words: a holding line is never its question
-        if isinstance(result, dict) and spoken.endswith('?'):
-            # The reply already ended with a question before this tool ran (the model spoke, then
-            # used a tool). Tell it, as data, and drop anything more it says in this reply (enforced
-            # in _say). No instruction goes in a tool result: those can look like a prompt injection.
-            question = re.split(r'(?<=[.!?])\s+', spoken)[-1]
-            result = {**result, 'already_asked_caller': question}
-            self._question_pending = True
         self._emit('tool', name=name, args=args, result=result)
         return result
 
@@ -249,11 +198,8 @@ class Conversation:
         self.partial = ''
         self._spoken = SpokenText()
         self._after_tool = False
-        self._question_pending = False
-        self._suppressed = ''
-        self._holding, self._held, self._last_char = False, '', ''
-        self._deciding, self._opening = True, ''
-        self._rounds, self._model_said, self._acked = 0, '', False
+        self._held = self._dropped = ''
+        self._rounds, self._acked = 0, False
         self._timing = {'started': time.monotonic(), 'first': None, 'tools': []}
         self._emit('caller', text=text)
         system, specs = self.system(), self.specs()
@@ -268,11 +214,10 @@ class Conversation:
             if turn_system:
                 exchange.append({'role': 'system', 'content': turn_system})
         await self._round_end([])  # anything still held (OpenAI path) is the answer
-        if self._suppressed.strip():
-            self._emit('suppressed', text=self._suppressed.strip(), reason='question already asked')
-            flow = self.session.get('flow')
-            if flow and flow.get('readback') and flow.get('readback_turn') == self.session.get('caller_turns'):
-                flow['readback'] = None  # the caller never heard it: a new read-back must be said first
+        flow = self.session.get('flow')
+        made_now = flow and flow.get('readback') and flow.get('readback_turn') == self.session.get('caller_turns')
+        if made_now and _has_read_back(flow['readback'], self._dropped) and not _has_read_back(flow['readback'], self.partial):
+            flow['readback'] = None  # said before a tool call and dropped: unheard, so a yes can't confirm it
         first = self._timing['first']
         self._emit('turn', first_word_ms=None if first is None else round(first * 1000),
                    total_ms=round((time.monotonic() - self._timing['started']) * 1000), tools=list(self._timing['tools']))
