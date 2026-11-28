@@ -1,11 +1,12 @@
-"""Local admin dashboard for the voice agent: live call, calls, reports, reviews, tests, flows,
+"""Admin dashboard for the voice agent: live call, calls, reports, reviews, tests, flows,
 knowledge, documentation and settings.
 
     python dashboard.py            opens http://127.0.0.1:8102 in your browser
 
-Local only: it listens on 127.0.0.1 (not reachable through the Cloudflare tunnel), rejects any
-other Host header, and every action needs a token generated when the dashboard starts. It
-never shows credentials. Transcripts, reports and reviews come from the private folder.
+The dashboard accepts only the Host headers listed in `DASHBOARD_HOSTS`, requires a signed
+session cookie (login from `/login`, three roles: admin, reviewer, reader) and keeps the
+per-form token that each action verifies. It never shows credentials. Transcripts, reports and
+reviews come from the private folder.
 """
 import asyncio
 from datetime import datetime
@@ -25,6 +26,7 @@ import webbrowser
 from fastapi import FastAPI, Form, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 
+import auth
 import configure
 import flows as flow_engine
 import harness
@@ -39,8 +41,7 @@ import app as voice_app  # the voice agent (named app.py); its defaults are show
 from private_files import make_private_dir, private_path, restrict  # path set up by transcripts
 
 HOST, PORT = '127.0.0.1', 8102
-ALLOWED_HOSTS = {f'{HOST}:{PORT}', f'localhost:{PORT}'}
-TOKEN = secrets.token_urlsafe(24)
+TOKEN = secrets.token_urlsafe(24)  # per-form CSRF token; regenerated on every restart
 HERE = Path(__file__).resolve().parent
 PILOT_HEALTH = os.environ.get('LSPCARE_AGENT_HEALTH', 'http://127.0.0.1:8101/health')  # in compose: http://agent:8101/health
 # Knowledge, flow and scenario edits change files in the repository. In a container those files are
@@ -49,6 +50,9 @@ PILOT_HEALTH = os.environ.get('LSPCARE_AGENT_HEALTH', 'http://127.0.0.1:8101/hea
 EDITING = os.environ.get('LSPCARE_EDITING', 'on').lower() != 'off'
 EDITING_OFF = ('Editing is off on this server: knowledge, flows and test scenarios are part of the deployed image. '
                'Make the change on a development PC, commit it, and rebuild the image here.')
+
+# Paths that don't require a session (the sign-in flow itself).
+PUBLIC_PATHS = frozenset({'/login', '/auth/login', '/auth/logout'})
 
 
 def require_editing():
@@ -60,16 +64,110 @@ app = FastAPI(title='LSPcare voice agent dashboard', docs_url=None, redoc_url=No
 
 
 @app.middleware('http')
-async def local_only(request, call_next):
-    # Blocks DNS-rebinding style access from web pages: only our own host names are served.
-    if request.headers.get('host') not in ALLOWED_HOSTS:
-        return HTMLResponse('Local dashboard only.', status_code=403)
-    return await call_next(request)
+async def host_and_session(request, call_next):
+    try:
+        auth_cfg = auth.read_config()
+    except ValueError as error:
+        return HTMLResponse(f'<h1>Configuration error</h1><p>{escape(str(error))}</p>', status_code=500)
+    # DNS-rebinding and misrouting defence: only serve requests whose Host header is one we expect.
+    if request.headers.get('host') not in auth_cfg.allowed_hosts:
+        return HTMLResponse('Not served at this address.', status_code=403)
+    # Parse any session cookie; sets request.state.login / role for every request, even public ones.
+    cookie_value = request.cookies.get(auth.SESSION_COOKIE, '')
+    login = auth.read_cookie(auth_cfg, cookie_value, auth.current_generation()) if cookie_value else None
+    request.state.login = login or ''
+    request.state.role = login or ''  # login name doubles as role name
+    token = _current_user.set((login or '', login or ''))
+    try:
+        if request.url.path in PUBLIC_PATHS:
+            return await call_next(request)
+        if login is None:
+            if request.method == 'GET':
+                target = request.url.path
+                if request.url.query:
+                    target += '?' + request.url.query
+                return RedirectResponse(f'/login?next={quote(target)}', status_code=303)
+            return HTMLResponse('Sign in required.', status_code=401)
+        return await call_next(request)
+    finally:
+        _current_user.reset(token)
 
 
 def check_token(token):
     if not secrets.compare_digest(str(token or ''), TOKEN):
         raise HTTPException(403, 'Missing or invalid dashboard token; reload the page.')
+
+
+def _safe_next(target: str) -> str:
+    """Only allow same-site next URLs (start with '/' and not '//') to stop open-redirect abuse."""
+    if not target or not target.startswith('/') or target.startswith('//'):
+        return '/'
+    return target
+
+
+def _login_html(error: str = '', next_target: str = '/', status: int = 200) -> HTMLResponse:
+    error_block = f'<p class="err">{escape(error)}</p>' if error else ''
+    html = (f'<!doctype html><html lang="en-AU"><head><meta charset="utf-8">'
+            f'<title>Sign in · LSPcare voice agent</title>'
+            f'<meta name="viewport" content="width=device-width,initial-scale=1"><style>{CSS}'
+            f'body{{display:flex;align-items:center;justify-content:center;background:#eef2f7}}'
+            f'form.signin{{background:#fff;padding:28px 32px;border:1px solid var(--line);border-radius:10px;'
+            f'max-width:360px;width:100%;display:flex;flex-direction:column;gap:14px;box-shadow:0 4px 14px #0002}}'
+            f'form.signin h1{{margin:0;font-size:20px}}form.signin label{{gap:6px}}'
+            f'form.signin .err{{color:var(--red);margin:0;background:var(--red-soft);padding:8px 10px;border-radius:6px}}'
+            f'form.signin input{{width:100%}}form.signin button{{align-self:stretch;padding:10px}}'
+            f'</style></head><body>'
+            f'<form method="post" action="/auth/login" class="signin" autocomplete="on">'
+            f'<h1>LSPcare voice agent</h1>'
+            f'<p class="muted" style="margin:0">Sign in to continue.</p>'
+            f'{error_block}'
+            f'<label>Username<input name="login" autocomplete="username" autofocus required></label>'
+            f'<label>Password<input name="password" type="password" autocomplete="current-password" required></label>'
+            f'<input type="hidden" name="next" value="{escape(next_target)}">'
+            f'<button type="submit">Sign in</button>'
+            f'</form></body></html>')
+    return HTMLResponse(html, status_code=status)
+
+
+@app.get('/login')
+async def login_page(request: Request, next: str = '/'):
+    if request.state.role:  # already signed in: bounce back to where they were going
+        return RedirectResponse(_safe_next(next), status_code=303)
+    return _login_html('', _safe_next(next))
+
+
+@app.post('/auth/login')
+async def auth_login(request: Request, login: str = Form(''), password: str = Form(''), next: str = Form('/')):
+    ip = auth.client_ip(request)
+    safe_next = _safe_next(next)
+    login = login.strip()
+    if not auth.rate_limit_allowed(ip):
+        auth.audit('login_rate_limited', login=login, ip=ip)
+        return _login_html('Too many attempts. Try again in a minute.', safe_next, status=429)
+    try:
+        cfg = auth.read_config()
+    except ValueError as error:
+        return HTMLResponse(f'<h1>Configuration error</h1><p>{escape(str(error))}</p>', status_code=500)
+    if auth.check_password(cfg, login, password):
+        auth.rate_limit_record(ip, success=True)
+        cookie_value = auth.sign_cookie(cfg, login, auth.current_generation())
+        auth.audit('login_ok', login=login, ip=ip)
+        response = RedirectResponse(safe_next, status_code=303)
+        response.set_cookie(auth.SESSION_COOKIE, cookie_value, max_age=auth.SESSION_SECONDS,
+                            httponly=True, secure=True, samesite='lax', path='/')
+        return response
+    auth.rate_limit_record(ip, success=False)
+    auth.audit('login_failed', login=login, ip=ip)
+    return _login_html('Wrong username or password.', safe_next, status=401)
+
+
+@app.post('/auth/logout')
+async def auth_logout(request: Request):
+    if request.state.login:
+        auth.audit('logout', login=request.state.login, ip=auth.client_ip(request))
+    response = RedirectResponse('/login', status_code=303)
+    response.delete_cookie(auth.SESSION_COOKIE, path='/')
+    return response
 
 
 # ------------------------------------------------------------------ rendering helpers
@@ -141,12 +239,22 @@ textarea.editor{width:100%;font:13px/1.5 Consolas,monospace;padding:10px;border:
 .spark .ax{font-size:10px;fill:var(--muted)}.spark .hit.on{fill:#14213d0d}
 .tip{position:absolute;z-index:20;background:#14213d;color:#fff;font-size:12px;padding:4px 8px;border-radius:6px;pointer-events:none;white-space:nowrap}
 .live-head{display:flex;align-items:center;gap:12px}.empty{padding:28px;text-align:center;color:var(--muted);background:#fff;border:1px dashed var(--line);border-radius:8px}
+aside .who{display:flex;align-items:center;gap:8px;margin:16px 14px 0;padding:10px 12px;border-top:1px solid #ffffff22;color:#dbe4f4;font-size:12px}
+aside .who>div{flex:1;display:flex;flex-direction:column;line-height:1.3}aside .who span{font-size:11px;color:#8fa3c7}
+aside .who form{display:inline;margin:0}aside .who button{padding:4px 10px;font-size:12px;background:#ffffff14;border:1px solid #ffffff2a;color:#fff}
+aside .who button:hover{background:#ffffff26}
 """
 
+import contextvars
+
+# Items are (href, name) or (href, name, min_role) where min_role filters by the current user's role.
 NAV = [('Monitor', [('/', 'Overview'), ('/live', 'Live call'), ('/calls', 'Calls'), ('/reports', 'Reports'), ('/reviews', 'Reviews')]),
        ('Improve', [('/issues', 'Issues'), ('/tests', 'Tests'), ('/flows', 'Flows'), ('/knowledge', 'Knowledge')]),
        ('Reference', [('/docs', 'Documentation')]),
-       ('Configure', [('/settings', 'Settings')])]
+       ('Configure', [('/settings', 'Settings'), ('/admin', 'Admin', 'admin')])]
+
+# Set by the auth middleware for each request; read by `page()` to render the user badge and filter nav.
+_current_user = contextvars.ContextVar('dashboard_current_user', default=('', ''))  # (login, role)
 
 
 def page(title, body, active='/'):
@@ -157,12 +265,23 @@ def page(title, body, active='/'):
         waiting = 0
     if waiting:
         badges['/issues'] = f' <span class="count" title="New issues to triage">{waiting}</span>'
-    nav = ''.join(f'<div class="group">{group}</div>' + ''.join(
-        f'<a href="{href}" class="{"on" if href == active else ""}">{name}{badges.get(href, "")}</a>'
-        for href, name in items) for group, items in NAV)
+    login, role = _current_user.get()
+    groups = []
+    for group, items in NAV:
+        shown = [item for item in items if len(item) == 2 or auth.role_allows(role, item[2])]
+        if not shown:
+            continue
+        groups.append(f'<div class="group">{group}</div>' + ''.join(
+            f'<a href="{item[0]}" class="{"on" if item[0] == active else ""}">{item[1]}{badges.get(item[0], "")}</a>'
+            for item in shown))
+    nav = ''.join(groups)
+    user_badge = ''
+    if login:
+        user_badge = (f'<div class="who"><div><b>{escape(login)}</b><span>{escape(role)}</span></div>'
+                      f'<form method="post" action="/auth/logout">{token_field()}<button class="ghost" type="submit">Sign out</button></form></div>')
     return HTMLResponse(f'<!doctype html><html lang="en-AU"><head><meta charset="utf-8"><title>{escape(title)} · LSPcare voice agent</title>'
                         f'<meta name="viewport" content="width=device-width,initial-scale=1"><style>{CSS}</style></head><body>'
-                        f'<aside><div class="brand">LSPcare voice agent<span>Staff pilot console</span></div>{nav}</aside>'
+                        f'<aside><div class="brand">LSPcare voice agent<span>Staff pilot console</span></div>{nav}{user_badge}</aside>'
                         f'<main>{body}</main></body></html>')
 
 
@@ -864,7 +983,7 @@ async def call_detail(name: str, made: str = ''):
     return page(f'Call {info["reference"] or ""}', body, '/calls')
 
 
-@app.post('/calls/{name}/scenario')
+@app.post('/calls/{name}/scenario', dependencies=[auth.requires('reviewer')])
 async def call_to_scenario(name: str, token: str = Form('')):
     check_token(token)
     require_editing()
@@ -881,7 +1000,7 @@ async def call_to_scenario(name: str, token: str = Form('')):
     return RedirectResponse(f'{call_url(path.name)}?made={scenario["id"]}', status_code=303)
 
 
-@app.post('/calls/{name}/review')
+@app.post('/calls/{name}/review', dependencies=[auth.requires('reviewer')])
 async def call_review(name: str, token: str = Form('')):
     check_token(token)
     path = call_path(name)
@@ -921,9 +1040,10 @@ async def reviews_page(file: str = ''):
     return page('Reviews', body, '/reviews')
 
 
-@app.post('/reviews/run')
-async def reviews_run(token: str = Form('')):
+@app.post('/reviews/run', dependencies=[auth.requires('admin')])
+async def reviews_run(request: Request, token: str = Form('')):
     check_token(token)
+    auth.audit('review_run', login=request.state.login, ip=auth.client_ip(request))
     return RedirectResponse(f'/jobs/{start_job("Review new calls", [sys.executable, "review.py", "--budget", "0.20"])}', status_code=303)
 
 
@@ -1054,9 +1174,9 @@ async def tests_compare(a: str = '', b: str = ''):
     return page('Compare runs', body, '/tests')
 
 
-@app.post('/tests/run')
-async def tests_run(token: str = Form(''), selection: str = Form('all'), only: str = Form(''), repeat: str = Form('1'),
-                    thinking: str = Form(''), budget: str = Form('0.50')):
+@app.post('/tests/run', dependencies=[auth.requires('admin')])
+async def tests_run(request: Request, token: str = Form(''), selection: str = Form('all'), only: str = Form(''),
+                    repeat: str = Form('1'), thinking: str = Form(''), budget: str = Form('0.50')):
     check_token(token)
     command = [sys.executable, 'harness.py', '--budget', str(min(float(budget), 1.0)), '--repeat', str(max(1, min(int(repeat), 3)))]
     if only.strip():
@@ -1067,6 +1187,8 @@ async def tests_run(token: str = Form(''), selection: str = Form('all'), only: s
         command += ['--tag', selection[4:]]
     if thinking in ('between_tools', 'adaptive'):
         command += ['--set', f'thinking={thinking}']
+    auth.audit('harness_run', login=request.state.login, ip=auth.client_ip(request),
+               selection=selection, only=only, repeat=repeat, budget=budget, thinking=thinking)
     return RedirectResponse(f'/jobs/{start_job("Conversation tests", command)}', status_code=303)
 
 
@@ -1251,8 +1373,8 @@ async def settings_page(saved: str = ''):
     return page('Settings', body, '/settings')
 
 
-@app.post('/settings')
-async def settings_save(token: str = Form(''), key: str = Form(...), value: str = Form(''), confirm: str = Form('')):
+@app.post('/settings', dependencies=[auth.requires('admin')])
+async def settings_save(request: Request, token: str = Form(''), key: str = Form(...), value: str = Form(''), confirm: str = Form('')):
     check_token(token)
     if key not in configure.SETTINGS:
         raise HTTPException(400, 'Unknown setting')
@@ -1287,6 +1409,10 @@ async def settings_save(token: str = Form(''), key: str = Form(...), value: str 
         return page('Confirm setting', body, '/settings')
     configure.save_config(cfg)
     log_setting(key, old, value)
+    # Settings that cost money or change who the caller is talking to are already risk-flagged above;
+    # the audit log records every change (safe or risky) with the person who made it.
+    auth.audit('setting_change', login=request.state.login, ip=auth.client_ip(request),
+               key=key, from_value=old, to_value=value)
     return RedirectResponse(f'/settings?saved={key}#{key}', status_code=303)
 
 
@@ -1412,14 +1538,14 @@ def proposed_flow(current, form):
     return flow_edit.from_form(current, form), None
 
 
-@app.get('/flows/{value}/edit')
+@app.get('/flows/{value}/edit', dependencies=[auth.requires('admin')])
 async def flow_edit_page(value: str):
     require_editing()
     current = flow_id_checked(value)
     return page(f'Edit {value}', flow_form(current, current), '/flows')
 
 
-@app.post('/flows/{value}/preview')
+@app.post('/flows/{value}/preview', dependencies=[auth.requires('admin')])
 async def flow_preview(value: str, request: Request):
     form = dict((await request.form()).items())
     check_token(form.get('token'))
@@ -1458,7 +1584,7 @@ async def flow_preview(value: str, request: Request):
     return page(f'Check {value}', body, '/flows')
 
 
-@app.post('/flows/{value}/back')
+@app.post('/flows/{value}/back', dependencies=[auth.requires('admin')])
 async def flow_back(value: str, request: Request):
     form = dict((await request.form()).items())
     check_token(form.get('token'))
@@ -1471,7 +1597,7 @@ async def flow_back(value: str, request: Request):
     return page(f'Edit {value}', flow_form(current, proposed, form.get('role', ''), form.get('note', '')), '/flows')
 
 
-@app.post('/flows/{value}/save')
+@app.post('/flows/{value}/save', dependencies=[auth.requires('admin')])
 async def flow_save(value: str, request: Request):
     form = dict((await request.form()).items())
     check_token(form.get('token'))
@@ -1598,7 +1724,7 @@ def edit_form(item, text, description, role='', note='', error=''):
       <div class="toolbar"><button>Preview and check</button><a class="btn ghost" href="/knowledge/{e(item['id'])}">Cancel</a></div></form>"""
 
 
-@app.get('/knowledge/{value}/edit')
+@app.get('/knowledge/{value}/edit', dependencies=[auth.requires('admin')])
 async def knowledge_edit_page(value: str):
     require_editing()
     item = knowledge_item(value)
@@ -1606,7 +1732,7 @@ async def knowledge_edit_page(value: str):
     return page(f'Edit {item["id"]}', edit_form(item, path.read_text(encoding='utf-8'), item.get('description', '')), '/knowledge')
 
 
-@app.post('/knowledge/{value}/preview')
+@app.post('/knowledge/{value}/preview', dependencies=[auth.requires('admin')])
 async def knowledge_preview(value: str, token: str = Form(''), version: str = Form(''), text: str = Form(''),
                             description: str = Form(''), role: str = Form(''), note: str = Form('')):
     check_token(token)
@@ -1641,7 +1767,7 @@ async def knowledge_preview(value: str, token: str = Form(''), version: str = Fo
     return page(f'Check {item["id"]}', body, '/knowledge')
 
 
-@app.post('/knowledge/{value}/back')
+@app.post('/knowledge/{value}/back', dependencies=[auth.requires('admin')])
 async def knowledge_back(value: str, token: str = Form(''), text: str = Form(''), description: str = Form(''),
                          role: str = Form(''), note: str = Form('')):
     check_token(token)
@@ -1650,7 +1776,7 @@ async def knowledge_back(value: str, token: str = Form(''), text: str = Form('')
     return page(f'Edit {item["id"]}', edit_form(item, text, description, role, note), '/knowledge')
 
 
-@app.post('/knowledge/{value}/save')
+@app.post('/knowledge/{value}/save', dependencies=[auth.requires('admin')])
 async def knowledge_save(value: str, token: str = Form(''), version: str = Form(''), text: str = Form(''),
                          description: str = Form(''), role: str = Form(''), note: str = Form('')):
     check_token(token)
@@ -1765,7 +1891,7 @@ async def issues_page(status: str = 'active', q: str = '', category: str = '', s
     return page('Issues', body, '/issues')
 
 
-@app.post('/issues/bulk')
+@app.post('/issues/bulk', dependencies=[auth.requires('reviewer')])
 async def issues_bulk(token: str = Form(''), ids: list[str] = Form([]), status: str = Form(''), note: str = Form(''),
                       back: str = Form('active')):
     check_token(token)
@@ -1779,7 +1905,7 @@ async def issues_bulk(token: str = Form(''), ids: list[str] = Form([]), status: 
     return RedirectResponse(f'/issues?status={target}', status_code=303)
 
 
-@app.post('/issues/new')
+@app.post('/issues/new', dependencies=[auth.requires('reviewer')])
 async def issues_new(token: str = Form(''), title: str = Form(''), detail: str = Form(''), reference: str = Form(''),
                      category: str = Form('unsorted')):
     check_token(token)
@@ -1862,7 +1988,7 @@ async def issue_page(value: str, saved: str = ''):
     return page(issue['id'], body, '/issues')
 
 
-@app.post('/issues/{value}')
+@app.post('/issues/{value}', dependencies=[auth.requires('reviewer')])
 async def issue_save(value: str, token: str = Form(''), status: str = Form(''), category: str = Form(''),
                      scenario: str = Form(''), note: str = Form('')):
     check_token(token)
@@ -1877,7 +2003,7 @@ async def issue_save(value: str, token: str = Form(''), status: str = Form(''), 
     return RedirectResponse(f'/issues/{value}?saved=1', status_code=303)
 
 
-@app.post('/issues/{value}/scenario')
+@app.post('/issues/{value}/scenario', dependencies=[auth.requires('reviewer')])
 async def issue_scenario(value: str, token: str = Form('')):
     check_token(token)
     require_editing()
@@ -1902,7 +2028,7 @@ async def issue_scenario(value: str, token: str = Form('')):
     return RedirectResponse(f'/issues/{value}?saved=1', status_code=303)
 
 
-@app.post('/issues/{value}/test')
+@app.post('/issues/{value}/test', dependencies=[auth.requires('admin')])
 async def issue_test(value: str, token: str = Form('')):
     check_token(token)
     issue = issue_store.get(issue_store.load(), issue_id(value))
@@ -2150,19 +2276,60 @@ async def scenarios_page(tag: str = '', q: str = ''):
     return page('Training scenarios', body, '/docs')
 
 
+@app.get('/admin', dependencies=[auth.requires('admin')])
+async def admin_page(request: Request):
+    audit_entries = auth.recent_audit(200)
+    generation = auth.current_generation()
+    rows = []
+    for entry in reversed(audit_entries):
+        detail = {k: v for k, v in entry.items() if k not in ('at', 'login', 'ip', 'action')}
+        rows.append(f'<tr><td>{e(entry.get("at", ""))}</td><td>{e(entry.get("login", ""))}</td>'
+                    f'<td>{e(entry.get("action", ""))}</td>'
+                    f'<td class="muted">{e(json.dumps(detail, ensure_ascii=False)) if detail else ""}</td>'
+                    f'<td class="muted">{e(entry.get("ip", ""))}</td></tr>')
+    log_table = ''.join(rows) or '<tr><td colspan="5" class="muted">No audit events yet.</td></tr>'
+    body = f'''<h1>Admin</h1>
+    <h2>Logins</h2>
+    <table><tr><th>Username</th><th>Role</th></tr>
+      <tr><td>admin</td><td>admin</td></tr>
+      <tr><td>reviewer</td><td>reviewer</td></tr>
+      <tr><td>reader</td><td>reader</td></tr>
+    </table>
+    <p class="muted">Passwords are stored in <code>.env</code> on the server, owner-only.</p>
+    <h2>Sessions</h2>
+    <p>Current session generation: <code>{generation}</code>. All live cookies carry this number;
+    bumping it signs everyone out, including you.</p>
+    <form method="post" action="/admin/invalidate-sessions" class="toolbar"
+      onsubmit="return confirm('Sign everyone out (including you)?');">
+      {token_field()}<button style="background:var(--red)">Sign everyone out</button></form>
+    <h2>Audit log (latest 200)</h2>
+    <table><tr><th>When</th><th>Login</th><th>Action</th><th>Detail</th><th>IP</th></tr>{log_table}</table>'''
+    return page('Admin', body, '/admin')
+
+
+@app.post('/admin/invalidate-sessions', dependencies=[auth.requires('admin')])
+async def admin_invalidate(request: Request, token: str = Form('')):
+    check_token(token)
+    previous = auth.current_generation()
+    new_generation = auth.bump_generation()
+    auth.audit('invalidate_sessions', login=request.state.login, ip=auth.client_ip(request),
+               from_gen=previous, to_gen=new_generation)
+    response = RedirectResponse('/login', status_code=303)
+    response.delete_cookie(auth.SESSION_COOKIE, path='/')
+    return response
+
+
 def main():
     import uvicorn
-    global PORT, ALLOWED_HOSTS
+    global PORT
     if '--port' in sys.argv:  # e.g. run a branch's dashboard next to the main one: --port 8103
         PORT = int(sys.argv[sys.argv.index('--port') + 1])
-        ALLOWED_HOSTS = {f'{HOST}:{PORT}', f'localhost:{PORT}'}
     # In a container, listen on all of the container's interfaces (--container). The compose file
-    # publishes the port on the server's 127.0.0.1 only, and the Host check still only accepts
-    # localhost / 127.0.0.1, so it is reached through an SSH tunnel, never through Cloudflare.
+    # publishes the port on the server's 127.0.0.1 only.
     bind = '0.0.0.0' if '--container' in sys.argv else HOST
     if sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
         sys.stdout.reconfigure(encoding='utf-8')
-    print(f'Dashboard: http://{HOST}:{PORT}  (this machine only; Ctrl+C to stop)'
+    print(f'Dashboard: http://{HOST}:{PORT}  (Ctrl+C to stop)'
           + ('' if EDITING else '  · knowledge, flow and scenario editing off'), flush=True)
     if '--no-browser' not in sys.argv and '--container' not in sys.argv:
         webbrowser.open(f'http://{HOST}:{PORT}')

@@ -54,11 +54,18 @@ services:
       TZ: ${TZ:-Australia/Adelaide}
       LSPCARE_AGENT_HEALTH: http://agent:8101/health
       LSPCARE_EDITING: "off"   # knowledge/flows/scenarios are part of the image: edit on a PC, commit, rebuild
-    # Published on the server's loopback only. Reach it through SSH:
-    #   ssh -L 8102:127.0.0.1:8102 <server>   then open http://localhost:8102
+      # Sign-in (see .env.example). Three static logins, one per role. The dashboard reads these on
+      # startup; a password change needs `docker compose up -d dashboard` to apply.
+      DASHBOARD_HOSTS: ${DASHBOARD_HOSTS:-localhost:8102,127.0.0.1:8102}
+      DASHBOARD_SESSION_SECRET: ${DASHBOARD_SESSION_SECRET:?set DASHBOARD_SESSION_SECRET in .env (head -c 32 /dev/urandom | base64)}
+      DASHBOARD_PASSWORD_ADMIN: ${DASHBOARD_PASSWORD_ADMIN:?set DASHBOARD_PASSWORD_ADMIN in .env}
+      DASHBOARD_PASSWORD_REVIEWER: ${DASHBOARD_PASSWORD_REVIEWER:?set DASHBOARD_PASSWORD_REVIEWER in .env}
+      DASHBOARD_PASSWORD_READER: ${DASHBOARD_PASSWORD_READER:?set DASHBOARD_PASSWORD_READER in .env}
+    # Published on the server's loopback only. Reach it through SSH or a reverse proxy in front.
     ports: ["127.0.0.1:8102:8102"]
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8102/', timeout=4)"]
+      # Hits the sign-in page, which is public: a 200 means the app answered and the Host check passed.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8102/login', timeout=4)"]
       interval: 60s
       timeout: 6s
       retries: 3

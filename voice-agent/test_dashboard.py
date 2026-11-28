@@ -1,6 +1,7 @@
 """Offline tests for the local dashboard: access rules, pages, settings and actions. No API calls."""
 import io
 import json
+import os
 from pathlib import Path
 import re
 import tempfile
@@ -9,6 +10,7 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
+import auth
 import configure
 import dashboard
 import harness
@@ -18,6 +20,20 @@ from private_files import is_private
 import review
 import test_pilot
 import transcripts
+
+
+# Fixed secret and passwords for the test environment; real values live in .env on the server.
+TEST_ENV = {'DASHBOARD_SESSION_SECRET': 'x' * 32,
+            'DASHBOARD_PASSWORD_ADMIN': 'admin-pw',
+            'DASHBOARD_PASSWORD_REVIEWER': 'reviewer-pw',
+            'DASHBOARD_PASSWORD_READER': 'reader-pw',
+            'DASHBOARD_HOSTS': '127.0.0.1:8102,localhost:8102,testserver'}
+
+
+def sign_in(client, role: str) -> None:
+    """Attach a valid session cookie for `role` to the client, without going through /auth/login."""
+    cookie = auth.sign_cookie(auth.read_config(), role, auth.current_generation())
+    client.cookies.set(auth.SESSION_COOKIE, cookie)
 
 
 class DashboardTests(unittest.TestCase):
@@ -32,16 +48,22 @@ class DashboardTests(unittest.TestCase):
         scenarios = root / 'scenarios.json'
         scenarios.write_text(json.dumps({'scenarios': [{'id': 'X-1', 'title': 'Example', 'tags': ['core'],
                                                         'caller': {'script': ['Hi']}}]}), encoding='utf-8')
+        self.env_patch = patch.dict(os.environ, TEST_ENV)
+        self.env_patch.start(); self.addCleanup(self.env_patch.stop)
+        auth.LOGIN_ATTEMPTS.clear()
         self.patches = [patch.object(configure, 'CONFIG', self.config), patch.object(transcripts, 'FOLDER', root / 'transcripts'),
                         patch.object(review, 'FOLDER', root / 'reviews'), patch.object(review, 'STATE', root / 'reviews' / 'reviewed.json'),
                         patch.object(harness, 'RUNS', root / 'runs'), patch.object(harness, 'SCENARIOS', scenarios),
                         patch.object(pilot_log, 'FEEDBACK_LOG', root / 'feedback.jsonl'),
                         patch.object(issues, 'STORE', root / 'issues.json'),
                         patch.object(dashboard, 'SETTINGS_LOG', root / 'settings-log.jsonl'),
-                        patch.object(dashboard, 'PILOT_HEALTH', 'http://127.0.0.1:9/health')]
+                        patch.object(dashboard, 'PILOT_HEALTH', 'http://127.0.0.1:9/health'),
+                        patch.object(auth, 'AUDIT_LOG', root / 'audit.jsonl'),
+                        patch.object(auth, 'SESSION_GEN', root / 'session_generation')]
         for p in self.patches:
             p.start(); self.addCleanup(p.stop)
         self.client = TestClient(dashboard.app, base_url='http://127.0.0.1:8102')
+        sign_in(self.client, 'admin')
         self.root = root
 
     def make_call(self, open_call=False):
@@ -121,9 +143,14 @@ class DashboardTests(unittest.TestCase):
         scenarios = self.client.get('/docs/scenarios?tag=core').text
         self.assertIn('X-1', scenarios); self.assertIn('Scripted caller', scenarios)
 
-    def test_only_local_host_names_are_served(self):
+    def test_only_allowed_host_names_are_served(self):
+        # An unknown Host is rejected before the session check runs.
         self.assertEqual(TestClient(dashboard.app, base_url='http://evil.example').get('/').status_code, 403)
-        self.assertEqual(TestClient(dashboard.app, base_url='http://localhost:8102').get('/knowledge').status_code, 200)
+        # A listed Host still requires a signed-in session.
+        other = TestClient(dashboard.app, base_url='http://localhost:8102')
+        self.assertEqual(other.get('/knowledge', follow_redirects=False).status_code, 303)
+        sign_in(other, 'admin')
+        self.assertEqual(other.get('/knowledge').status_code, 200)
 
     def test_every_page_renders_and_never_shows_secrets(self):
         path = self.make_call()
