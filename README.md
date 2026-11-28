@@ -36,6 +36,7 @@ Full technical reference: [`docs/technical-reference.pdf`](docs/technical-refere
 | `mock-backend/` | Mock LSPcare API (synthetic vouchers, device lookup) and shared modules (`static_inventory.py`, `private_files.py`) ([README](mock-backend/README.md)) |
 | `knowledge/` | Reviewed knowledge library and registry ([README](knowledge/README.md)) |
 | `scripts/` | `setup_zoho_desk.py`: Zoho Desk OAuth set-up and read-only check |
+| `CLAUDE.md` | Working rules and design lessons for developers and AI agents |
 | `docs/` | [Testing](docs/testing.md), [knowledge workflow](docs/knowledge.md), [business rules](docs/business-rules.md), [mock backend contract](docs/mock-backend.md), technical reference |
 
 ## Private data stays outside the repo
@@ -65,13 +66,13 @@ powershell -ExecutionPolicy Bypass -File run.ps1     # tunnel + server + Twilio 
 Tests:
 
 ```powershell
-.venv\Scripts\python.exe -m unittest test_pilot test_claude test_stages test_harness   # free
+.venv\Scripts\python.exe -m unittest test_pilot test_claude test_stages test_harness test_pilot_loop test_dashboard test_flows test_knowledge_edit test_flow_edit test_listening   # free
 .venv\Scripts\python.exe harness.py                                                    # conversations, capped at US$0.50
 ```
 
 ## Current limitations
 
-- Runs on one PC through a temporary Cloudflare tunnel; hosting is not set up yet.
+- Runs on a single staff-testing server (Docker and a Cloudflare named tunnel: [docs/home-server.md](docs/home-server.md)); not production hosting.
 - No SMS, vouchers, payments or transfer to a person yet; the agent says so truthfully.
 - At most 2 simultaneous calls; call state is in memory.
 - Transcripts are on for the staff pilot; turn them off before any real patient data.

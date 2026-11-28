@@ -20,6 +20,8 @@ decides each reply.
 | `dashboard.py` | Local admin dashboard: calls, reports, reviews, tests, settings, knowledge |
 | `review.py` | Automatic review of staff calls against the agent's rules ([docs/testing.md](../docs/testing.md)) |
 | `harness.py`, `scenarios.json` | Conversation test harness ([docs/testing.md](../docs/testing.md)) |
+| `latency_probe.py` | Offline time-to-first-word check for changes to the speaking path |
+| `listening.py` | Echo check, silence re-ask timing, relay message logging |
 | `configure.py` | Private credentials and settings |
 | `run.ps1` | Windows launcher: tunnel, server, Twilio number update, READY banner |
 | `test_*.py` | Offline tests (fake Twilio, Zoho and AI) |
@@ -83,7 +85,7 @@ Code changes need a restart.
 ## Test
 
 ```powershell
-.venv\Scripts\python.exe -m unittest test_pilot test_claude test_stages test_harness test_pilot_loop test_dashboard test_flows
+.venv\Scripts\python.exe -m unittest test_pilot test_claude test_stages test_harness test_pilot_loop test_dashboard test_flows test_knowledge_edit test_flow_edit test_listening
 .venv\Scripts\python.exe harness.py --list
 .venv\Scripts\python.exe harness.py --only HW-01 --set thinking=adaptive
 .venv\Scripts\python.exe review.py                 # review new staff calls (capped at US$0.20)
