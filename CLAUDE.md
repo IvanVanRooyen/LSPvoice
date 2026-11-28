@@ -25,7 +25,8 @@ rules and the lessons behind the current design. Keep it current when the design
 
 ## Before you commit
 
-1. Run every offline test (all must pass; 144 at the time of writing):
+1. Run every offline test (all must pass; 144 + 35 at the time of writing; on the server, use
+   the container command under "Running and deploying on the server"):
    ```
    cd voice-agent
    python -m unittest test_pilot test_claude test_stages test_harness test_pilot_loop test_dashboard test_flows test_knowledge_edit test_flow_edit test_listening
@@ -55,12 +56,21 @@ export GIT_COMMIT=$(git rev-parse --short HEAD); docker compose up -d --build
   `docker compose exec agent python transcripts.py --list`). A restart cuts live calls.
 - Deploy committed code: every transcript is stamped with `GIT_COMMIT`, and uncommitted changes
   would carry the previous commit's stamp.
-- Tests can run against the checkout using the image's dependencies, without the private data:
+- Tests run against the checkout using the image's dependencies, without the private data. The
+  server has no Python of its own, so this is the way (from the repository root, using the
+  deployed image):
   ```
-  docker run --rm --tmpfs /tmp -v "$PWD":/src:ro -w /src/voice-agent -e LSPCARE_PRIVATE_DIR=/tmp/p \
-    -e LSPCARE_RUNS_DIR=/tmp/r -e PYTHONDONTWRITEBYTECODE=1 lspvoice:<tag> python -m unittest <modules>
+  IMAGE=$(docker compose ps agent --format '{{.Image}}')
+  docker run --rm --network none --tmpfs /tmp -v "$PWD":/src:ro -w /src/voice-agent \
+    -e LSPCARE_PRIVATE_DIR=/tmp/p -e LSPCARE_RUNS_DIR=/tmp/r -e PYTHONDONTWRITEBYTECODE=1 \
+    "$IMAGE" python -m unittest test_pilot test_claude test_stages test_harness \
+    test_pilot_loop test_dashboard test_flows test_knowledge_edit test_flow_edit test_listening
   ```
-  (or a Python 3.14 venv with `voice-agent/requirements.txt`). Record the command that works here.
+  The same with `-w /src/mock-backend` and `test_static_inventory test_vouchers`, and with
+  `python latency_probe.py` for the speed probe. `--network none` guarantees no API calls. If
+  `requirements.txt` changed, build first (`docker compose build`) and set `IMAGE` to the new
+  `lspvoice:<commit>` image. Counts on
+  28 Nov 2026: 144 voice-agent tests (1 skipped) and 35 mock-backend tests.
 - Harness and reviews need the API key, so they run in the agent container:
   `docker compose exec agent python harness.py --only TIX-01 --repeat 2`. Results go to `/data/runs`.
 - Windows-only pieces (`run.ps1`, `.venv\Scripts\...` in older docs) are for a PC set-up.
